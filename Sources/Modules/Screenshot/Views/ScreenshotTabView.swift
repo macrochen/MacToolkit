@@ -3,6 +3,7 @@ import SwiftUI
 /// 截图模块设置页
 struct ScreenshotTabView: View {
     @ObservedObject var viewModel: ScreenshotViewModel
+    var module: ScreenshotModule
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -12,14 +13,25 @@ struct ScreenshotTabView: View {
                     HStack {
                         Text("截图快捷键:")
                         Spacer()
-                        Text(viewModel.config.hotkey.displayString)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 4)
-                            .background(Color.gray.opacity(0.2))
-                            .cornerRadius(4)
+                        HotkeyRecorderView(
+                            keyCode: Binding(
+                                get: { viewModel.config.hotkey.keyCode },
+                                set: { newKeyCode in
+                                    viewModel.config.hotkey.keyCode = newKeyCode
+                                    saveAndReRegister()
+                                }
+                            ),
+                            modifiers: Binding(
+                                get: { viewModel.config.hotkey.modifiers },
+                                set: { newModifiers in
+                                    viewModel.config.hotkey.modifiers = newModifiers
+                                    saveAndReRegister()
+                                }
+                            )
+                        )
                     }
                     
-                    Text("默认: ⌘+Shift+A")
+                    Text("点击录制区域，然后按下新的快捷键组合")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -74,6 +86,11 @@ struct ScreenshotTabView: View {
         .frame(width: 400)
     }
     
+    private func saveAndReRegister() {
+        viewModel.config.save()
+        module.registerHotKey()
+    }
+    
     private func selectDirectory() {
         let panel = NSOpenPanel()
         panel.title = "选择保存目录"
@@ -83,6 +100,7 @@ struct ScreenshotTabView: View {
         
         if panel.runModal() == .OK, let url = panel.url {
             viewModel.config.saveDirectory = url
+            viewModel.config.save()
         }
     }
 }

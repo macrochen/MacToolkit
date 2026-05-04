@@ -8,16 +8,16 @@ class ScreenshotModule: ToolkitModule {
     let name = "截图"
     let icon = "camera.viewfinder"
     
-    private let viewModel = ScreenshotViewModel()
+    let viewModel = ScreenshotViewModel()
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     
     var tabView: AnyView {
-        AnyView(ScreenshotTabView(viewModel: viewModel))
+        AnyView(ScreenshotTabView(viewModel: viewModel, module: self))
     }
     
     var settingsView: AnyView {
-        AnyView(ScreenshotTabView(viewModel: viewModel))
+        AnyView(ScreenshotTabView(viewModel: viewModel, module: self))
     }
     
     func onAppLaunch() {
@@ -30,18 +30,24 @@ class ScreenshotModule: ToolkitModule {
     
     // MARK: - 快捷键注册
     
-    private func registerHotKey() {
-        // 注册全局快捷键 ⌘+Shift+A
+    func registerHotKey() {
+        // 先注销旧的
+        unregisterHotKey()
+        
+        let hotkey = viewModel.config.hotkey
+        
+        // 确保有有效的快捷键配置
+        guard hotkey.keyCode > 0 else { return }
+        
         var eventType = EventTypeSpec()
         eventType.eventClass = OSType(kEventClassKeyboard)
         eventType.eventKind = OSType(kEventHotKeyPressed)
         
         // 安装事件处理器
         let handler: EventHandlerUPP = { _, event, _ -> OSStatus in
-            // 在主线程执行截图
             DispatchQueue.main.async {
-                if let appDelegate = NSApp.delegate as? AppDelegate {
-                    appDelegate.startScreenshot()
+                if let module = ModuleRegistry.shared.modules.first(where: { $0.id == "screenshot" }) as? ScreenshotModule {
+                    module.startScreenshot()
                 }
             }
             return noErr
@@ -51,20 +57,25 @@ class ScreenshotModule: ToolkitModule {
         InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, nil, &handlerRef)
         eventHandler = handlerRef
         
-        // 注册热键
+        // 注册热键 - 从配置读取
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = OSType(0x5343524e) // "SCRN"
         hotKeyID.id = 1
         
-        RegisterEventHotKey(UInt32(0x00), UInt32(cmdKey | shiftKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef) // 0x00 = A key
+        let keyCode = hotkey.keyCode
+        let modifiers = hotkey.carbonModifiers
+        
+        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
     
-    private func unregisterHotKey() {
+    func unregisterHotKey() {
         if let hotKeyRef = hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
         }
         if let eventHandler = eventHandler {
             RemoveEventHandler(eventHandler)
+            self.eventHandler = nil
         }
     }
     
@@ -72,15 +83,5 @@ class ScreenshotModule: ToolkitModule {
     
     func startScreenshot() {
         viewModel.startCapture()
-    }
-}
-
-// MARK: - App 扩展
-
-extension AppDelegate {
-    func startScreenshot() {
-        if let module = ModuleRegistry.shared.modules.first(where: { $0.id == "screenshot" }) as? ScreenshotModule {
-            module.startScreenshot()
-        }
     }
 }
