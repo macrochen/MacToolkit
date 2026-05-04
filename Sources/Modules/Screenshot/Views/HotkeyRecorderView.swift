@@ -15,13 +15,10 @@ struct HotkeyRecorderView: View {
         if modifiers.contains(.option) { parts.append("⌥") }
         if modifiers.contains(.control) { parts.append("⌃") }
         
-        if keyCode > 0 {
-            parts.append(HotkeyConfig.keyCodeToString(keyCode))
-        } else if !parts.isEmpty {
-            parts.append("?")
-        }
+        // keyCode 0 = A 键，也是有效的
+        parts.append(HotkeyConfig.keyCodeToString(keyCode))
         
-        return parts.isEmpty ? "点击录制快捷键" : parts.joined()
+        return parts.joined()
     }
     
     var body: some View {
