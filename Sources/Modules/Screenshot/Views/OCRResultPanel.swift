@@ -40,6 +40,10 @@ struct OCRResultPanel: View {
                     Label("复制文字", systemImage: "doc.on.doc")
                 }
                 
+                Button(action: { viewModel.saveToFile() }) {
+                    Label("保存文件", systemImage: "doc.badge.arrow.down")
+                }
+                
                 Spacer()
                 
                 Button(action: { viewModel.closeOCRPanel() }) {

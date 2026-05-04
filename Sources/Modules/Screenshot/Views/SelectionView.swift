@@ -4,6 +4,7 @@ import SwiftUI
 struct SelectionView: View {
     @ObservedObject var viewModel: ScreenshotViewModel
     let screenSize: CGSize
+    let screen: NSScreen
     
     // 控制点大小
     private let handleSize: CGFloat = 8
@@ -23,9 +24,9 @@ struct SelectionView: View {
                 SelectionDragArea(viewModel: viewModel)
             }
             
-            // 选区创建拖拽区域
+            // 选区创建区域 - 支持触摸板滑动
             if viewModel.state == .selecting {
-                SelectionCreationArea(viewModel: viewModel, screenSize: screenSize)
+                TrackpadSelectionView(viewModel: viewModel, screenSize: screenSize, screen: screen)
             }
         }
     }
@@ -37,10 +38,12 @@ struct SelectionBorder: View {
     let selection: CGRect
     
     var body: some View {
-        Rectangle()
-            .stroke(Color.blue, lineWidth: 2)
-            .frame(width: selection.width, height: selection.height)
-            .position(x: selection.midX, y: selection.midY)
+        if selection.width > 0 && selection.height > 0 {
+            Rectangle()
+                .stroke(Color.blue, lineWidth: 2)
+                .frame(width: selection.width, height: selection.height)
+                .position(x: selection.midX, y: selection.midY)
+        }
     }
 }
 
@@ -54,22 +57,27 @@ struct ResizeHandles: View {
         let sel = viewModel.selection
         
         // 8 个控制点
-        ForEach(ResizeHandle.allCases, id: \.self) { handle in
+        ForEach(ScreenshotViewModel.ResizeHandle.allCases, id: \.self) { handle in
             ResizeHandleView(handle: handle, selection: sel, size: handleSize)
                 .gesture(
-                    DragGesture()
+                    DragGesture(minimumDistance: 1)
                         .onChanged { value in
+                            if !viewModel.isDragging {
+                                viewModel.isDragging = true
+                                viewModel.activeHandle = handle
+                            }
                             resizeSelection(handle: handle, translation: value.translation)
                         }
                         .onEnded { _ in
-                            // 确保选区有效
+                            viewModel.isDragging = false
+                            viewModel.activeHandle = .none
                             normalizeSelection()
                         }
                 )
         }
     }
     
-    private func resizeSelection(handle: ResizeHandle, translation: CGSize) {
+    private func resizeSelection(handle: ScreenshotViewModel.ResizeHandle, translation: CGSize) {
         var sel = viewModel.selection
         let dx = translation.width
         let dy = translation.height
@@ -101,6 +109,8 @@ struct ResizeHandles: View {
         case .w:
             sel.origin.x += dx
             sel.size.width -= dx
+        case .none:
+            break
         }
         
         // 最小尺寸约束
@@ -123,16 +133,10 @@ struct ResizeHandles: View {
     }
 }
 
-// MARK: - 控制点枚举
-
-enum ResizeHandle: CaseIterable {
-    case nw, n, ne, e, se, s, sw, w
-}
-
 // MARK: - 控制点视图
 
 struct ResizeHandleView: View {
-    let handle: ResizeHandle
+    let handle: ScreenshotViewModel.ResizeHandle
     let selection: CGRect
     let size: CGFloat
     
@@ -155,6 +159,7 @@ struct ResizeHandleView: View {
         case .s:  return CGPoint(x: selection.midX, y: selection.maxY)
         case .sw: return CGPoint(x: selection.minX, y: selection.maxY)
         case .w:  return CGPoint(x: selection.minX, y: selection.midY)
+        case .none: return .zero
         }
     }
 }
@@ -162,7 +167,7 @@ struct ResizeHandleView: View {
 // MARK: - 光标修饰符
 
 struct CursorModifier: ViewModifier {
-    let handle: ResizeHandle
+    let handle: ScreenshotViewModel.ResizeHandle
     
     func body(content: Content) -> some View {
         content
@@ -175,18 +180,19 @@ struct CursorModifier: ViewModifier {
             }
     }
     
-    private func cursorForHandle(_ handle: ResizeHandle) -> NSCursor {
+    private func cursorForHandle(_ handle: ScreenshotViewModel.ResizeHandle) -> NSCursor {
         switch handle {
         case .nw, .se: return NSCursor.crosshair  // nwse-resize
         case .ne, .sw: return NSCursor.crosshair  // nesw-resize
         case .n, .s:   return NSCursor.resizeUpDown
         case .e, .w:   return NSCursor.resizeLeftRight
+        case .none:    return NSCursor.arrow
         }
     }
 }
 
 extension View {
-    func cursor(handle: ResizeHandle) -> some View {
+    func cursor(handle: ScreenshotViewModel.ResizeHandle) -> some View {
         modifier(CursorModifier(handle: handle))
     }
 }
@@ -196,6 +202,8 @@ extension View {
 struct SelectionDragArea: View {
     @ObservedObject var viewModel: ScreenshotViewModel
     
+    @State private var dragStart: CGPoint?
+    
     var body: some View {
         Rectangle()
             .fill(Color.clear)
@@ -203,10 +211,21 @@ struct SelectionDragArea: View {
             .position(x: viewModel.selection.midX, y: viewModel.selection.midY)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        viewModel.selection.origin.x += value.translation.width
-                        viewModel.selection.origin.y += value.translation.height
+                        if dragStart == nil {
+                            dragStart = CGPoint(
+                                x: viewModel.selection.origin.x,
+                                y: viewModel.selection.origin.y
+                            )
+                        }
+                        if let start = dragStart {
+                            viewModel.selection.origin.x = start.x + value.translation.width
+                            viewModel.selection.origin.y = start.y + value.translation.height
+                        }
+                    }
+                    .onEnded { _ in
+                        dragStart = nil
                     }
             )
     }
@@ -219,6 +238,7 @@ struct SelectionCreationArea: View {
     let screenSize: CGSize
     
     @State private var dragStart: CGPoint?
+    @State private var currentEnd: CGPoint?
     
     var body: some View {
         Rectangle()
@@ -226,23 +246,47 @@ struct SelectionCreationArea: View {
             .frame(width: screenSize.width, height: screenSize.height)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
-                    .onEnded { value in
-                        let start = value.startLocation
-                        let end = CGPoint(x: start.x + value.translation.width,
-                                         y: start.y + value.translation.height)
-                        
-                        let rect = CGRect(
-                            x: min(start.x, end.x),
-                            y: min(start.y, end.y),
-                            width: abs(end.x - start.x),
-                            height: abs(end.y - start.y)
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if dragStart == nil {
+                            dragStart = value.startLocation
+                        }
+                        currentEnd = CGPoint(
+                            x: value.startLocation.x + value.translation.width,
+                            y: value.startLocation.y + value.translation.height
                         )
                         
-                        if rect.width >= 20 && rect.height >= 20 {
+                        // 实时更新选区
+                        if let start = dragStart, let end = currentEnd {
+                            let rect = CGRect(
+                                x: min(start.x, end.x),
+                                y: min(start.y, end.y),
+                                width: abs(end.x - start.x),
+                                height: abs(end.y - start.y)
+                            )
                             viewModel.selection = rect
-                            viewModel.finishSelection()
                         }
+                    }
+                    .onEnded { value in
+                        if let start = dragStart, let end = currentEnd {
+                            let rect = CGRect(
+                                x: min(start.x, end.x),
+                                y: min(start.y, end.y),
+                                width: abs(end.x - start.x),
+                                height: abs(end.y - start.y)
+                            )
+                            
+                            if rect.width >= 20 && rect.height >= 20 {
+                                viewModel.selection = rect
+                                viewModel.finishSelection()
+                            } else {
+                                // 选区太小，重置
+                                viewModel.selection = .zero
+                            }
+                        }
+                        
+                        dragStart = nil
+                        currentEnd = nil
                     }
             )
     }

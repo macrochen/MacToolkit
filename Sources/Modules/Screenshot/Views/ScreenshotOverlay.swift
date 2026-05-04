@@ -3,53 +3,93 @@ import SwiftUI
 /// 全屏截图覆盖层
 struct ScreenshotOverlay: View {
     @ObservedObject var viewModel: ScreenshotViewModel
+    let screen: NSScreen
     
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                // 背景遮罩
-                BackgroundMask(selection: viewModel.selection)
-                    .ignoresSafeArea()
-                
-                // 选区
-                if viewModel.state != .idle {
-                    SelectionView(viewModel: viewModel, screenSize: geometry.size)
+        // 直接使用屏幕尺寸，不依赖 GeometryReader（可能受 safe area 影响导致尺寸偏小）
+        let screenSize = screen.frame.size
+        
+        ZStack {
+            // 背景遮罩 - 点击空白区域可退出
+            BackgroundMask(selection: viewModel.selection)
+                .ignoresSafeArea()
+                .onTapGesture(count: 2) {
+                    // 双击空白区域退出
+                    viewModel.cancel()
                 }
-                
-                // 标注工具栏
-                if viewModel.state == .selected || viewModel.state == .annotating {
-                    AnnotationToolbar(viewModel: viewModel)
-                        .position(x: viewModel.selection.midX,
-                                  y: viewModel.selection.maxY + 30)
-                }
-                
-                // OCR 结果面板
-                if case .ocrResult(let text) = viewModel.state {
-                    OCRResultPanel(text: text, viewModel: viewModel)
-                        .position(x: viewModel.selection.maxX + 150,
-                                  y: viewModel.selection.midY)
-                }
-                
-                // OCR Loading
-                if viewModel.state == .ocrLoading {
-                    OCRLoadingView()
-                        .position(x: viewModel.selection.midX,
-                                  y: viewModel.selection.midY)
-                }
-                
-                // Toast
-                if viewModel.isShowingToast, let message = viewModel.toastMessage {
-                    ToastView(message: message)
-                        .position(x: geometry.size.width / 2,
-                                  y: geometry.size.height - 50)
-                }
+            
+            // 选区
+            if viewModel.state != .idle {
+                SelectionView(viewModel: viewModel, screenSize: screenSize, screen: screen)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onKeyPress(.escape) {
-                viewModel.cancel()
-                return .handled
+            
+            // 标注工具栏
+            if viewModel.state == .selected || viewModel.state == .annotating {
+                AnnotationToolbar(viewModel: viewModel)
+                    .position(x: viewModel.selection.midX,
+                              y: viewModel.selection.maxY + 30)
+            }
+            
+            // OCR 结果面板
+            if case .ocrResult(let text) = viewModel.state {
+                OCRResultPanel(text: text, viewModel: viewModel)
+                    .position(x: viewModel.selection.maxX + 150,
+                              y: viewModel.selection.midY)
+            }
+            
+            // OCR Loading
+            if viewModel.state == .ocrLoading {
+                OCRLoadingView()
+                    .position(x: viewModel.selection.midX,
+                              y: viewModel.selection.midY)
+            }
+            
+            // Toast
+            if viewModel.isShowingToast, let message = viewModel.toastMessage {
+                ToastView(message: message)
+                    .position(x: screenSize.width / 2,
+                              y: screenSize.height - 50)
+            }
+            
+            // 关闭按钮 - 始终显示在右上角
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: { viewModel.cancel() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.white.opacity(0.8))
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(20)
+                    .help("按 Esc 或双击空白区域也可退出")
+                }
+                Spacer()
+            }
+            
+            // 底部提示
+            if viewModel.state == .selecting || viewModel.state == .idle {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Text("拖拽选区 | Esc 退出 | 双击空白退出")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.7))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.black.opacity(0.5))
+                            .cornerRadius(8)
+                        Spacer()
+                    }
+                    .padding(.bottom, 30)
+                }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 注意：不在这里处理 Escape 键，由 CGEvent tap 统一处理
+        // 避免与 NSApp 的 Escape 键处理冲突
     }
 }
 

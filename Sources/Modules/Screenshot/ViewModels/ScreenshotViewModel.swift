@@ -43,12 +43,24 @@ class ScreenshotViewModel: ObservableObject {
     @Published var toastMessage: String?
     @Published var isShowingToast = false
     
+    // MARK: - 覆盖层控制回调（由 ScreenshotModule 设置）
+    var onHideOverlay: (() -> Void)?
+    var onShowOverlay: (() -> Void)?
+    
     // MARK: - 选区调整相关
-    enum ResizeHandle {
+    enum ResizeHandle: CaseIterable {
         case none, nw, n, ne, e, se, s, sw, w
+        
+        static var allCases: [ResizeHandle] {
+            return [.nw, .n, .ne, .e, .se, .s, .sw, .w]
+        }
     }
     @Published var activeHandle: ResizeHandle = .none
     @Published var isDragging = false
+    
+    // MARK: - 安全超时
+    private var safetyTimer: Timer?
+    private let safetyTimeout: TimeInterval = 300 // 5分钟超时自动关闭
     
     // MARK: - 操作
     
@@ -63,6 +75,9 @@ class ScreenshotViewModel: ObservableObject {
         state = .selecting
         isShowingOverlay = true
         selection = .zero
+        
+        // 启动安全超时
+        startSafetyTimer()
     }
     
     /// 完成选区
@@ -146,26 +161,62 @@ class ScreenshotViewModel: ObservableObject {
     func saveToFile() {
         guard let image = renderFinalImage() else { return }
         
+        // 先隐藏覆盖层，避免遮挡保存对话框
+        onHideOverlay?()
+        
         if let url = ExportService.showSavePanel(image: image, defaultDirectory: config.saveDirectory) {
             showToast("已保存到 \(url.lastPathComponent)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 self.closeOverlay()
             }
+        } else {
+            // 用户取消了保存，重新显示覆盖层
+            onShowOverlay?()
         }
     }
     
     // MARK: - 渲染
     
-    /// 渲染最终图片（原始截图 + 标注）
+    /// 渲染最终图片（根据选区裁剪 + 标注）
     func renderFinalImage() -> NSImage? {
         guard let cgImage = capturedImage else { return nil }
         
-        let image = ExportService.nsImage(from: cgImage)
-        let size = NSSize(width: cgImage.width, height: cgImage.height)
+        // 确保选区有效
+        guard selection.width > 0 && selection.height > 0 else {
+            print("[ScreenshotViewModel] ❌ Invalid selection: \(selection)")
+            return nil
+        }
         
+        // 将选区坐标从 SwiftUI 坐标系（左上角原点）转换为 CGImage 坐标系（左下角原点）
+        let screenHeight = CGFloat(cgImage.height)
+        let scaleX = CGFloat(cgImage.width) / NSScreen.main!.frame.width
+        let scaleY = CGFloat(cgImage.height) / NSScreen.main!.frame.height
+        
+        // 转换选区坐标到图片坐标系
+        let imageSelection = CGRect(
+            x: selection.origin.x * scaleX,
+            y: (screenHeight - (selection.origin.y + selection.height) * scaleY),
+            width: selection.width * scaleX,
+            height: selection.height * scaleY
+        )
+        
+        print("[ScreenshotViewModel] Selection in SwiftUI coords: \(selection)")
+        print("[ScreenshotViewModel] Selection in image coords: \(imageSelection)")
+        print("[ScreenshotViewModel] Image size: \(cgImage.width) x \(cgImage.height)")
+        
+        // 裁剪图片到选区
+        guard let croppedCGImage = cgImage.cropping(to: imageSelection) else {
+            print("[ScreenshotViewModel] ❌ Failed to crop image")
+            return nil
+        }
+        
+        let croppedImage = ExportService.nsImage(from: croppedCGImage)
+        let croppedSize = NSSize(width: croppedCGImage.width, height: croppedCGImage.height)
+        
+        // 创建位图上下文绘制裁剪后的图片 + 标注
         let bitmapRep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                          pixelsWide: Int(size.width),
-                                          pixelsHigh: Int(size.height),
+                                          pixelsWide: Int(croppedSize.width),
+                                          pixelsHigh: Int(croppedSize.height),
                                           bitsPerSample: 8,
                                           samplesPerPixel: 4,
                                           hasAlpha: true,
@@ -182,16 +233,63 @@ class ScreenshotViewModel: ObservableObject {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         
-        // 绘制原始图片
-        image.draw(in: NSRect(origin: .zero, size: size))
+        // 绘制裁剪后的图片
+        croppedImage.draw(in: NSRect(origin: .zero, size: croppedSize))
         
-        // 绘制标注
-        drawAnnotations(in: context, size: size)
+        // 绘制标注（需要调整坐标，因为原点变了）
+        drawAnnotationsForCroppedImage(in: context, imageSize: croppedSize)
         
         NSGraphicsContext.restoreGraphicsState()
         
         guard let finalImage = bitmapRep.cgImage else { return nil }
         return ExportService.nsImage(from: finalImage)
+    }
+    
+    /// 绘制标注到裁剪后的图片
+    private func drawAnnotationsForCroppedImage(in context: NSGraphicsContext, imageSize: NSSize) {
+        guard let cgImage = capturedImage else { return }
+        
+        let scaleX = CGFloat(cgImage.width) / NSScreen.main!.frame.width
+        let scaleY = CGFloat(cgImage.height) / NSScreen.main!.frame.height
+        
+        // 计算选区在图片坐标系中的位置
+        let screenHeight = CGFloat(cgImage.height)
+        let imageSelection = CGRect(
+            x: selection.origin.x * scaleX,
+            y: (screenHeight - (selection.origin.y + selection.height) * scaleY),
+            width: selection.width * scaleX,
+            height: selection.height * scaleY
+        )
+        
+        for annotation in annotationEngine.annotations {
+            // 转换标注点坐标到裁剪后的图片坐标系
+            let convertedPoints = annotation.points.map { point -> CGPoint in
+                let imagePoint = CGPoint(
+                    x: point.x * scaleX,
+                    y: screenHeight - point.y * scaleY
+                )
+                // 相对于裁剪区域的坐标
+                return CGPoint(
+                    x: imagePoint.x - imageSelection.origin.x,
+                    y: imagePoint.y - imageSelection.origin.y
+                )
+            }
+            
+            switch annotation.type {
+            case .rect:
+                drawRectWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
+            case .arrow:
+                drawArrowWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
+            case .freehand:
+                drawFreehandWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
+            case .text:
+                if let text = annotation.text, let position = convertedPoints.first {
+                    drawTextAtPoint(text, position: position, color: annotation.color)
+                }
+            case .mosaic:
+                drawMosaicWithPoints(convertedPoints)
+            }
+        }
     }
     
     /// 绘制标注到上下文
@@ -311,6 +409,105 @@ class ScreenshotViewModel: ObservableObject {
         }
     }
     
+    // MARK: - 标注绘制辅助方法（用于裁剪后的图片）
+    
+    private func drawRectWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
+        guard points.count >= 2 else { return }
+        let start = points[0]
+        let end = points[1]
+        let rect = CGRect(x: min(start.x, end.x),
+                          y: min(start.y, end.y),
+                          width: abs(end.x - start.x),
+                          height: abs(end.y - start.y))
+        
+        let path = NSBezierPath(rect: rect)
+        path.lineWidth = lineWidth
+        NSColor(color).setStroke()
+        path.stroke()
+    }
+    
+    private func drawArrowWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
+        guard points.count >= 2 else { return }
+        let start = points[0]
+        let end = points[1]
+        
+        let path = NSBezierPath()
+        path.move(to: start)
+        path.line(to: end)
+        path.lineWidth = lineWidth
+        NSColor(color).setStroke()
+        path.stroke()
+        
+        // 箭头头部
+        let angle = atan2(end.y - start.y, end.x - start.x)
+        let arrowLength: CGFloat = 12
+        let arrowAngle: CGFloat = .pi / 6
+        
+        let arrow1 = CGPoint(x: end.x - arrowLength * cos(angle - arrowAngle),
+                             y: end.y - arrowLength * sin(angle - arrowAngle))
+        let arrow2 = CGPoint(x: end.x - arrowLength * cos(angle + arrowAngle),
+                             y: end.y - arrowLength * sin(angle + arrowAngle))
+        
+        let arrowPath = NSBezierPath()
+        arrowPath.move(to: end)
+        arrowPath.line(to: arrow1)
+        arrowPath.move(to: end)
+        arrowPath.line(to: arrow2)
+        arrowPath.lineWidth = lineWidth
+        arrowPath.stroke()
+    }
+    
+    private func drawFreehandWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
+        guard points.count >= 2 else { return }
+        
+        let path = NSBezierPath()
+        path.move(to: points[0])
+        for point in points.dropFirst() {
+            path.line(to: point)
+        }
+        path.lineWidth = lineWidth
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        NSColor(color).setStroke()
+        path.stroke()
+    }
+    
+    private func drawTextAtPoint(_ text: String, position: CGPoint, color: Color) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16),
+            .foregroundColor: NSColor(color)
+        ]
+        let nsString = text as NSString
+        nsString.draw(at: position, withAttributes: attributes)
+    }
+    
+    private func drawMosaicWithPoints(_ points: [CGPoint]) {
+        guard points.count >= 2 else { return }
+        let start = points[0]
+        let end = points[1]
+        let rect = CGRect(x: min(start.x, end.x),
+                          y: min(start.y, end.y),
+                          width: abs(end.x - start.x),
+                          height: abs(end.y - start.y))
+        
+        // 简单的马赛克效果：用半透明矩形填充
+        let mosaicSize: CGFloat = 10
+        NSColor.white.setFill()
+        
+        var x = rect.minX
+        while x < rect.maxX {
+            var y = rect.minY
+            while y < rect.maxY {
+                let blockRect = CGRect(x: x, y: y,
+                                       width: min(mosaicSize, rect.maxX - x),
+                                       height: min(mosaicSize, rect.maxY - y))
+                NSBezierPath(rect: blockRect).fill()
+                y += mosaicSize
+            }
+            x += mosaicSize
+        }
+    }
+    
     // MARK: - Toast
     
     func showToast(_ message: String) {
@@ -325,6 +522,9 @@ class ScreenshotViewModel: ObservableObject {
     // MARK: - 关闭
     
     func closeOverlay() {
+        // 取消安全超时
+        cancelSafetyTimer()
+        
         isShowingOverlay = false
         state = .idle
         selection = .zero
@@ -336,6 +536,24 @@ class ScreenshotViewModel: ObservableObject {
     // MARK: - 取消
     
     func cancel() {
+        print("[ScreenshotViewModel] Cancel called")
         closeOverlay()
+    }
+    
+    // MARK: - 安全超时机制
+    
+    private func startSafetyTimer() {
+        cancelSafetyTimer()
+        safetyTimer = Timer.scheduledTimer(withTimeInterval: safetyTimeout, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                print("[ScreenshotViewModel] ⚠️ Safety timeout reached, force closing overlay")
+                self?.closeOverlay()
+            }
+        }
+    }
+    
+    private func cancelSafetyTimer() {
+        safetyTimer?.invalidate()
+        safetyTimer = nil
     }
 }

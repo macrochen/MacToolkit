@@ -38,8 +38,8 @@ struct AnnotationToolbar: View {
             Divider()
                 .frame(height: 20)
             
-            // 保存文件
-            ToolButton(icon: "doc.badge.arrow.down", label: "保存文件", shortcut: "⌘S") {
+            // 保存
+            ToolButton(icon: "square.and.arrow.down", label: "保存", shortcut: "⌘S") {
                 viewModel.saveToFile()
             }
             .foregroundColor(.blue)

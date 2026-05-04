@@ -73,8 +73,16 @@ struct ScreenshotTabView: View {
                     
                     if !ScreenCaptureService.checkPermission() {
                         Button("打开系统偏好设置") {
+                            print("[ScreenshotTabView] Button tapped - opening System Preferences")
                             ScreenCaptureService.requestPermission()
                         }
+                        .onAppear {
+                            print("[ScreenshotTabView] Button appeared - permission not granted")
+                        }
+                    } else {
+                        Text("屏幕录制权限已授权，可以正常使用截图功能")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding(.vertical, 8)

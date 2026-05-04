@@ -44,3 +44,43 @@ macOS 菜单栏工具箱应用，Swift Package Manager 构建。
 ### 其他
 
 - `Models.swift` 同名会导致 SPM 构建冲突，需重命名
+
+### 截图覆盖窗口安全规则
+
+全屏覆盖窗口（`.screenSaver` level）必须实现多重退出机制，防止用户被锁死：
+1. CGEvent tap 级别处理 Escape（最可靠）
+2. 可视关闭按钮（右上角）
+3. 双击空白区域退出
+4. 5分钟安全超时自动关闭
+5. 底部操作提示文字
+
+关键陷阱：
+- 使用 `orderOut` 代替 `close`（防止 app 退出）
+- 设置 `isReleasedWhenClosed = false` + `isExcludedFromWindowsMenu = true`
+- CGEvent tap 中 Escape 直接调用 cancel，不用 DispatchQueue.main.async
+- 不要在 SwiftUI 中同时用 `onKeyPress(.escape)`（冲突导致 app 退出两次）
+
+详见 `macos-overlay-window-safety-skill`。
+
+### 截图坐标系转换
+
+三个坐标系混用是主要 bug 来源：
+- **NSView**：左下角原点，Y 向上（mouseDown/touchesBegan 事件）
+- **SwiftUI**：左上角原点，Y 向下（View position、DragGesture）
+- **CGImage**：左下角原点，Y 向上（cropping、像素坐标）
+
+触摸板选区 → SwiftUI 选区：`swiftY = screenHeight - nsViewY`
+SwiftUI 选区 → CGImage 裁剪：`imageY = imageH - (selY + selH) * scaleH`
+
+触摸板滑动选区需用 NSViewRepresentable（SwiftUI DragGesture 需要点击才能开始）。
+
+### 三指拖动光标位置获取
+
+`CGEvent.mouseLocation()` 在 MultitouchSupport 后台线程回调中返回缓存值（不更新）。
+MultitouchSupport 的 posX/posY 归一化坐标不能直接映射到屏幕位置（有未知偏移）。
+
+正确方案：**MultitouchSupport 检测三指状态 + CGEventTap 监听 mouseMoved 获取真实光标位置**。
+- MultitouchSupport：只检测 `activeFingerCount >= 3`（开始）和 `< 3`（结束）
+- CGEventTap `.listenOnly`：监听 `mouseMoved`，`event.location` 即真实光标位置
+- AppKit → SwiftUI 转换：`swiftY = screenOriginY + screenHeight - appKitY`
+- CGEventTap 必须加到 `CFRunLoopGetMain()`，窗口关闭时 `tapEnable(enable: false)` 清理
