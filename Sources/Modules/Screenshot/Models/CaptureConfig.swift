@@ -59,11 +59,10 @@ struct HotkeyConfig {
         if modifiers.contains(.option) { parts.append("⌥") }
         if modifiers.contains(.control) { parts.append("⌃") }
         
-        if keyCode > 0 {
-            parts.append(HotkeyConfig.keyCodeToString(keyCode))
-        }
+        // keyCode 0 = A 键，也是有效的
+        parts.append(HotkeyConfig.keyCodeToString(keyCode))
         
-        return parts.isEmpty ? "未设置" : parts.joined()
+        return parts.joined()
     }
     
     /// 转换为 Carbon 修饰键

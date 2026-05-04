@@ -36,9 +36,6 @@ class ScreenshotModule: ToolkitModule {
         
         let hotkey = viewModel.config.hotkey
         
-        // 确保有有效的快捷键配置
-        guard hotkey.keyCode > 0 else { return }
-        
         var eventType = EventTypeSpec()
         eventType.eventClass = OSType(kEventClassKeyboard)
         eventType.eventKind = OSType(kEventHotKeyPressed)
