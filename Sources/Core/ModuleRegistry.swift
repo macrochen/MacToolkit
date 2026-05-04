@@ -26,7 +26,12 @@ class ModuleRegistry: ObservableObject {
     }
 
     func launchAll() {
-        modules.forEach { $0.onAppLaunch() }
+        print("[ModuleRegistry] Launching \(modules.count) modules...")
+        modules.forEach { module in
+            print("[ModuleRegistry] Launching module: \(module.id) - \(module.name)")
+            module.onAppLaunch()
+        }
+        print("[ModuleRegistry] All modules launched")
     }
 
     func terminateAll() {
