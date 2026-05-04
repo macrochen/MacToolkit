@@ -25,28 +25,37 @@ final class TypingService: ObservableObject {
     }
 
     func send(snippet: Snippet, permissionService: PermissionService) {
+        print("[TypingService] send called for: \(snippet.title)")
         permissionService.refresh()
 
         guard permissionService.isAccessibilityGranted else {
             statusMessage = "缺少辅助功能权限，无法发送文本。"
+            print("[TypingService] ❌ No accessibility permission")
             return
         }
+        print("[TypingService] ✅ Accessibility permission granted")
 
         guard let target = currentTargetApplication() else {
             statusMessage = "请先切到目标应用一次，再使用快捷键。"
+            print("[TypingService] ❌ No target application")
             return
         }
+        print("[TypingService] ✅ Target app: \(target.localizedName ?? "unknown")")
 
         statusMessage = "正在发送到 \(target.localizedName ?? "目标应用")..."
         lastExternalApp = target
         lastTargetName = target.localizedName ?? "未知应用"
 
         Task { @MainActor in
+            print("[TypingService] Waiting for modifiers to clear...")
             await waitForHotKeyModifiersToClear()
+            print("[TypingService] Activating target...")
             target.activate()
             try? await Task.sleep(for: .milliseconds(Self.targetActivationDelayMilliseconds))
+            print("[TypingService] Pasting content...")
             await pasteAndSubmit(snippet.content, autoEnter: snippet.autoEnter)
             statusMessage = "已发送: \(snippet.title)"
+            print("[TypingService] ✅ Done")
         }
     }
 

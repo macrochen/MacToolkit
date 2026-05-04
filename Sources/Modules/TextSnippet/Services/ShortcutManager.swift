@@ -1,4 +1,4 @@
-import Carbon
+import AppKit
 import Foundation
 
 @MainActor
@@ -8,20 +8,14 @@ final class ShortcutManager: ObservableObject {
     private var snippets: [Snippet] = []
     private weak var permissionService: PermissionService?
     private weak var typingService: TypingService?
-    private var hotKeyRefs: [UUID: EventHotKeyRef] = [:]
-    private var hotKeyLookup: [UInt32: UUID] = [:]
-    private var nextHotKeyID: UInt32 = 1
-    private var eventHandlerRef: EventHandlerRef?
-    private let signature = OSType(0x54454E54)
-
-    init() {
-        installEventHandlerIfNeeded()
-    }
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
     func configure(with snippets: [Snippet], permissionService: PermissionService, typingService: TypingService) {
         self.snippets = snippets
         self.permissionService = permissionService
         self.typingService = typingService
+        print("[ShortcutManager] Configuring with \(snippets.count) snippets")
         registerHotKeys()
     }
 
@@ -39,102 +33,119 @@ final class ShortcutManager: ObservableObject {
         statusMessage = "已触发快捷短语: \(snippet.title)"
     }
 
-    private func installEventHandlerIfNeeded() {
-        guard eventHandlerRef == nil else { return }
-
-        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let userData = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, userData in
-                guard
-                    let userData,
-                    let event
-                else {
-                    return noErr
-                }
-
-                let manager = Unmanaged<ShortcutManager>.fromOpaque(userData).takeUnretainedValue()
-                var hotKeyID = EventHotKeyID()
-                let status = GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-
-                guard status == noErr else { return status }
-                manager.handleHotKey(carbonID: hotKeyID.id)
-                return noErr
-            },
-            1,
-            &eventSpec,
-            userData,
-            &eventHandlerRef
-        )
-    }
-
     private func registerHotKeys() {
-        for ref in hotKeyRefs.values {
-            UnregisterEventHotKey(ref)
-        }
+        print("[ShortcutManager] Registering hotkeys...")
 
-        hotKeyRefs.removeAll()
-        hotKeyLookup.removeAll()
-        nextHotKeyID = 1
+        // 先移除旧的 tap
+        removeEventTap()
 
         let enabledSnippets = snippets.filter(\.isEnabled)
-        let duplicateDisplays = duplicates(in: enabledSnippets.map(\.shortcut.displayText))
-        guard duplicateDisplays.isEmpty else {
-            statusMessage = "有重复快捷键: \(duplicateDisplays.joined(separator: "、"))"
+        print("[ShortcutManager] Enabled snippets: \(enabledSnippets.count)")
+
+        guard !enabledSnippets.isEmpty else {
+            statusMessage = "没有启用的快捷短语。"
             return
         }
 
-        var failedDisplays: [String] = []
-
-        for snippet in enabledSnippets {
-            guard
-                let keyCode = Self.keyCode(for: snippet.shortcut.key),
-                let modifiers = Self.carbonModifiers(for: snippet.shortcut)
-            else {
-                failedDisplays.append(snippet.shortcut.displayText)
-                continue
-            }
-
-            var hotKeyRef: EventHotKeyRef?
-            let carbonID = EventHotKeyID(signature: signature, id: nextHotKeyID)
-            let registerStatus = RegisterEventHotKey(
-                UInt32(keyCode),
-                modifiers,
-                carbonID,
-                GetApplicationEventTarget(),
-                0,
-                &hotKeyRef
-            )
-
-            if registerStatus == noErr, let hotKeyRef {
-                hotKeyRefs[snippet.id] = hotKeyRef
-                hotKeyLookup[nextHotKeyID] = snippet.id
-                nextHotKeyID += 1
-            } else {
-                failedDisplays.append(snippet.shortcut.displayText)
-            }
+        // 检查重复快捷键
+        let duplicateDisplays = duplicates(in: enabledSnippets.map(\.shortcut.displayText))
+        guard duplicateDisplays.isEmpty else {
+            statusMessage = "有重复快捷键: \(duplicateDisplays.joined(separator: "、"))"
+            print("[ShortcutManager] Duplicate hotkeys found: \(duplicateDisplays)")
+            return
         }
 
-        if failedDisplays.isEmpty {
-            statusMessage = "已注册 \(hotKeyRefs.count) 个全局快捷键。"
-        } else {
-            statusMessage = "已注册 \(hotKeyRefs.count) 个快捷键，失败: \(failedDisplays.joined(separator: "、"))"
+        for snippet in enabledSnippets {
+            print("[ShortcutManager] Registering: \(snippet.shortcut.displayText)")
+        }
+
+        // 使用 CGEventTap 拦截键盘事件
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        let eventMask = (1 << CGEventFlags.maskCommand.rawValue) != 0
+            ? CGEventMask(1 << CGEventType.keyDown.rawValue)
+            : CGEventMask(1 << CGEventType.keyDown.rawValue)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
+            callback: { proxy, type, event, refcon -> Unmanaged<CGEvent>? in
+                guard let refcon = refcon else {
+                    return Unmanaged.passRetained(event)
+                }
+
+                let manager = Unmanaged<ShortcutManager>.fromOpaque(refcon).takeUnretainedValue()
+
+                // 只处理 keyDown 事件
+                if type == .keyDown {
+                    let flags = event.flags
+                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+                    if manager.handleKeyEvent(keyCode: keyCode, flags: flags) {
+                        // 匹配到快捷键，吞噬事件
+                        return nil
+                    }
+                }
+
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: selfPtr
+        ) else {
+            print("[ShortcutManager] ❌ Failed to create event tap")
+            statusMessage = "无法创建事件监听，请检查辅助功能权限。"
+            return
+        }
+
+        self.eventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        self.runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+
+        statusMessage = "已注册 \(enabledSnippets.count) 个全局快捷键。"
+        print("[ShortcutManager] \(statusMessage)")
+    }
+
+    private func handleKeyEvent(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        // 将 CGEventFlags 转换为 NSEvent.ModifierFlags 进行比较
+        let nsFlags = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
+
+        for snippet in snippets where snippet.isEnabled {
+            guard let expectedKeyCode = Self.keyCode(for: snippet.shortcut.key) else { continue }
+            let expectedModifiers = Self.modifierFlags(for: snippet.shortcut)
+
+            if Int64(expectedKeyCode) == keyCode && nsFlags.contains(expectedModifiers) {
+                // 检查修饰键是否完全匹配（不包含其他修饰键）
+                let relevantFlags = nsFlags.intersection([.command, .option, .control, .shift])
+                if relevantFlags == expectedModifiers {
+                    print("[ShortcutManager] Matched: \(snippet.shortcut.displayText) -> \(snippet.title)")
+                    // 在主线程触发
+                    DispatchQueue.main.async { [weak self] in
+                        self?.triggerSnippet(id: snippet.id)
+                    }
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private func removeEventTap() {
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            runLoopSource = nil
+        }
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            eventTap = nil
         }
     }
 
-    private func handleHotKey(carbonID: UInt32) {
-        guard let snippetID = hotKeyLookup[carbonID] else { return }
-        triggerSnippet(id: snippetID)
+    nonisolated deinit {
+        // Cleanup is done in removeEventTap()
     }
 
     private func duplicates(in items: [String]) -> [String] {
@@ -150,23 +161,23 @@ final class ShortcutManager: ObservableObject {
         return repeated.sorted()
     }
 
-    private static func carbonModifiers(for shortcut: Shortcut) -> UInt32? {
-        var flags: UInt32 = 0
+    private static func modifierFlags(for shortcut: Shortcut) -> NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
 
         for modifier in shortcut.modifiers {
             switch modifier {
             case .command:
-                flags |= UInt32(cmdKey)
+                flags.insert(NSEvent.ModifierFlags.command)
             case .option:
-                flags |= UInt32(optionKey)
+                flags.insert(NSEvent.ModifierFlags.option)
             case .control:
-                flags |= UInt32(controlKey)
+                flags.insert(NSEvent.ModifierFlags.control)
             case .shift:
-                flags |= UInt32(shiftKey)
+                flags.insert(NSEvent.ModifierFlags.shift)
             }
         }
 
-        return flags == 0 ? nil : flags
+        return flags
     }
 
     private static func keyCode(for key: String) -> UInt32? {

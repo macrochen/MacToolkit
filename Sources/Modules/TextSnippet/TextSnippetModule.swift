@@ -41,6 +41,8 @@ class TextSnippetModule: ToolkitModule {
     }
 
     func onAppLaunch() {
+        print("[TextSnippetModule] onAppLaunch called")
+        print("[TextSnippetModule] Snippets count: \(snippetStore.snippets.count)")
         shortcutManager.configure(
             with: snippetStore.snippets,
             permissionService: permissionService,
@@ -52,6 +54,7 @@ class TextSnippetModule: ToolkitModule {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snippets in
                 guard let self = self else { return }
+                print("[TextSnippetModule] Snippets changed: \(snippets.count)")
                 self.shortcutManager.configure(
                     with: snippets,
                     permissionService: self.permissionService,
