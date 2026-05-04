@@ -17,6 +17,7 @@ class ModuleRegistry: ObservableObject {
             MouseKeyMapperModule(),
             FinderDockHelperModule(),
             TouchpadGestureHelperModule(),
+            ScreenshotModule(),
         ]
 
         if let first = modules.first {
