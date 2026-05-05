@@ -46,12 +46,28 @@ class ScreenshotModule: ToolkitModule {
             }
             .store(in: &cancellables)
         
-        registerHotKey()
+        // 根据启用状态决定是否注册热键
+        if viewModel.config.isEnabled {
+            registerHotKey()
+        }
     }
     
     func onAppTerminate() {
         overlayWindowController?.close()
         unregisterHotKey()
+    }
+    
+    // MARK: - 启用/禁用截图功能
+    
+    func setEnabled(_ enabled: Bool) {
+        viewModel.config.isEnabled = enabled
+        viewModel.config.save()
+        
+        if enabled {
+            registerHotKey()
+        } else {
+            unregisterHotKey()
+        }
     }
     
     // MARK: - 快捷键注册

@@ -7,6 +7,17 @@ struct ScreenshotTabView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            // 启用开关
+            GroupBox {
+                Toggle("启用截图功能", isOn: Binding(
+                    get: { viewModel.config.isEnabled },
+                    set: { newValue in
+                        module.setEnabled(newValue)
+                    }
+                ))
+                .padding(.vertical, 8)
+            }
+            
             // 快捷键设置
             GroupBox(label: Text("快捷键").font(.headline)) {
                 VStack(alignment: .leading, spacing: 8) {
@@ -29,6 +40,7 @@ struct ScreenshotTabView: View {
                                 }
                             )
                         )
+                        .disabled(!viewModel.config.isEnabled)
                     }
                     
                     Text("点击录制区域，然后按下新的快捷键组合")
@@ -36,6 +48,7 @@ struct ScreenshotTabView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(.vertical, 8)
+                .opacity(viewModel.config.isEnabled ? 1.0 : 0.5)
             }
             
             // 保存设置

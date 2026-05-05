@@ -3,6 +3,9 @@ import Carbon.HIToolbox
 
 /// 截图配置
 struct CaptureConfig {
+    /// 截图功能是否启用
+    var isEnabled: Bool
+    
     /// 默认保存目录
     var saveDirectory: URL
     
@@ -10,6 +13,10 @@ struct CaptureConfig {
     var hotkey: HotkeyConfig
     
     init() {
+        // 从 UserDefaults 加载启用状态（默认启用）
+        let savedEnabled = UserDefaults.standard.object(forKey: "screenshot_is_enabled") as? Bool
+        self.isEnabled = savedEnabled ?? true
+        
         // 从 UserDefaults 加载保存目录
         if let savedPath = UserDefaults.standard.string(forKey: "screenshot_save_directory") {
             self.saveDirectory = URL(fileURLWithPath: savedPath)
@@ -30,6 +37,7 @@ struct CaptureConfig {
     
     /// 保存到 UserDefaults
     func save() {
+        UserDefaults.standard.set(isEnabled, forKey: "screenshot_is_enabled")
         UserDefaults.standard.set(saveDirectory.path, forKey: "screenshot_save_directory")
         UserDefaults.standard.set(Int(hotkey.keyCode), forKey: "screenshot_hotkey_keycode")
         UserDefaults.standard.set(Int(hotkey.modifiers.rawValue), forKey: "screenshot_hotkey_modifiers")

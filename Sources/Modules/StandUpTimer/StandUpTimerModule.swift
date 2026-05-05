@@ -46,7 +46,7 @@ class FloatingAlertWindowController {
     private var window: NSWindow?
     private var isShowing = false
 
-    func show(displaySeconds: Int, onDismiss: @escaping @MainActor () -> Void) {
+    func show(phase: TimerPhase, displaySeconds: Int, onDismiss: @escaping @MainActor () -> Void) {
         guard !isShowing else { return }
         isShowing = true
 
@@ -61,7 +61,7 @@ class FloatingAlertWindowController {
             return
         }
 
-        let catView = CatOverlayView(displaySeconds: displaySeconds) { [weak self] in
+        let catView = CatOverlayView(phase: phase, displaySeconds: displaySeconds) { [weak self] in
             guard let self = self, self.isShowing else { return }
             self.isShowing = false
             self.closeWindow()
@@ -122,8 +122,9 @@ class AlertObserver {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 guard !self.timer.isResetting else { return }
+                let phase = self.timer.currentPhase
                 let seconds = self.settings.catDisplaySeconds
-                self.alertController.show(displaySeconds: seconds) {
+                self.alertController.show(phase: phase, displaySeconds: seconds) {
                     self.timer.nextPhase()
                 }
             }
