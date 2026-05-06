@@ -8,6 +8,7 @@ struct CatOverlayView: View {
 
     @State private var showCat = false
     @State private var showText = false
+    @State private var isDismissing = false
     
     // 根据阶段生成提示文案
     private var tip: String {
@@ -47,7 +48,7 @@ struct CatOverlayView: View {
             ZStack {
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture { onDismiss() }
+                    .onTapGesture { dismissWithAnimation() }
 
                 // 猫咪动画 - 按比例适配屏幕
                 CatVideoPlayerView(
@@ -56,8 +57,8 @@ struct CatOverlayView: View {
                 )
                 .scaledToFit()
                 .frame(maxWidth: geo.size.width * 0.8, maxHeight: geo.size.height * 0.7)
-                .scaleEffect(showCat ? 1.0 : 0.7)
-                .opacity(showCat ? 1 : 0)
+                .scaleEffect(isDismissing ? 0.3 : (showCat ? 1.0 : 0.3))
+                .opacity(isDismissing ? 0 : (showCat ? 1 : 0))
                 
                 // 温馨提示文案 - 垂直居中偏上
                 VStack {
@@ -71,8 +72,8 @@ struct CatOverlayView: View {
                             Capsule()
                                 .fill(Color.black.opacity(0.45))
                         )
-                        .opacity(showText ? 1 : 0)
-                        .offset(y: showText ? 0 : -10)
+                        .opacity(isDismissing ? 0 : (showText ? 1 : 0))
+                        .offset(y: isDismissing ? 10 : (showText ? 0 : -10))
                     Spacer()
                     Spacer()
                 }
@@ -86,8 +87,19 @@ struct CatOverlayView: View {
                 showText = true
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(displaySeconds)) {
-                onDismiss()
+                dismissWithAnimation()
             }
+        }
+    }
+
+    private func dismissWithAnimation() {
+        // 先播放消失动画
+        withAnimation(.easeIn(duration: 0.4)) {
+            isDismissing = true
+        }
+        // 动画完成后调用 onDismiss
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            onDismiss()
         }
     }
 }

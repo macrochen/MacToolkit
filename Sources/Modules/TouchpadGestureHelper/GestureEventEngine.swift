@@ -179,9 +179,8 @@ class GestureEventEngine: @unchecked Sendable {
     
     private func mapFingerCountToGesture(_ count: Int) -> TouchpadGestureType? {
         switch count {
-        case 2:  return .threeFingerTap   // 2 fingers on trackpad = 3-finger tap convention
-        case 3:  return .fourFingerTap    // 3 fingers = 4-finger tap
-        case 4:  return .fourFingerTap    // 4 fingers also = 4-finger tap
+        case 3:  return .threeFingerTap
+        case 4:  return .fourFingerTap
         default: return nil
         }
     }
