@@ -41,6 +41,13 @@ macOS 菜单栏工具箱应用，Swift Package Manager 构建。
 - `NSImageView` 拦截鼠标事件 → 用自定义 `PassthroughNSImageView`（hitTest 返回 nil）
 - `keyCode 0` = A 键（有效值），displayString/register/录制器三处需同步处理
 
+### CGEvent tap 最佳实践
+
+1. 截图等非关键功能用 `.cgSessionEventTap` + `.listenOnly`，不干扰系统手势
+2. `.cghidEventTap` + `.defaultTap` 会阻塞触控板手势（4指滑动等），慎用
+3. 必须处理 `.tapDisabledByTimeout` 重新启用 tap
+4. CGEvent tap 回调中避免过多 print，影响性能
+
 ### 其他
 
 - `Models.swift` 同名会导致 SPM 构建冲突，需重命名
@@ -84,3 +91,8 @@ MultitouchSupport 的 posX/posY 归一化坐标不能直接映射到屏幕位置
 - CGEventTap `.listenOnly`：监听 `mouseMoved`，`event.location` 即真实光标位置
 - AppKit → SwiftUI 转换：`swiftY = screenOriginY + screenHeight - appKitY`
 - CGEventTap 必须加到 `CFRunLoopGetMain()`，窗口关闭时 `tapEnable(enable: false)` 清理
+
+### StandUpTimer 久坐提醒 UI 规范
+
+- 猫咪动画用 GeometryReader + scaledToFit，尺寸为屏幕 80%宽 x 70%高
+- 提示文字必须加半透明背景（Capsule + black.opacity(0.45)），纯文字+阴影在不同屏幕背景下看不清

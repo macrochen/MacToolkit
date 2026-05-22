@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+final class ScreenshotOverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 /// 截图全屏覆盖层窗口控制器
 @MainActor
 class ScreenshotOverlayWindowController: NSObject, NSWindowDelegate {
@@ -32,7 +37,7 @@ class ScreenshotOverlayWindowController: NSObject, NSWindowDelegate {
         print("[ScreenshotOverlayWindowController] Screen frame: \(screenFrame)")
         
         // 创建全屏透明窗口
-        let win = NSWindow(
+        let win = ScreenshotOverlayWindow(
             contentRect: screenFrame,
             styleMask: .borderless,
             backing: .buffered,
@@ -45,6 +50,7 @@ class ScreenshotOverlayWindowController: NSObject, NSWindowDelegate {
         win.backgroundColor = .clear
         win.hasShadow = false
         win.ignoresMouseEvents = false
+        win.acceptsMouseMovedEvents = true
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         win.delegate = self
         win.isReleasedWhenClosed = false  // 关闭时不释放窗口
@@ -57,6 +63,7 @@ class ScreenshotOverlayWindowController: NSObject, NSWindowDelegate {
         
         // 显示窗口
         win.makeKeyAndOrderFront(nil)
+        win.makeMain()
         NSApp.activate(ignoringOtherApps: true)
         
         self.window = win

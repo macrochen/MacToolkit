@@ -36,7 +36,7 @@ struct TrackpadSelectionView: NSViewRepresentable {
                 guard let self = self else { return }
                 // normalizedToScreen 已经输出 SwiftUI 坐标（Y=0 顶部，Y 向下）
                 // 直接使用，无需翻转
-                self.viewModel.selection = rect
+                self.viewModel.updateSelection(rect)
             }
         }
         
@@ -44,17 +44,17 @@ struct TrackpadSelectionView: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 if rect.width >= 20 && rect.height >= 20 {
-                    self.viewModel.selection = rect
+                    self.viewModel.updateSelection(rect)
                     self.viewModel.finishSelection()
                 } else {
-                    self.viewModel.selection = .zero
+                    self.viewModel.updateSelection(.zero)
                 }
             }
         }
         
         nonisolated func selectionDidCancel() {
             DispatchQueue.main.async { [weak self] in
-                self?.viewModel.selection = .zero
+                self?.viewModel.updateSelection(.zero)
             }
         }
     }
@@ -68,12 +68,10 @@ protocol TrackpadSelectionDelegate: AnyObject {
 
 // MARK: - MultitouchSupport 3-Finger Drag Detector
 
-/// 使用 MultitouchSupport 同时检测三指状态和位置
-/// 坐标公式: x = norm.x * screenWidth, y = (1 - norm.y) * screenHeight
+/// 使用 MultitouchSupport 只检测三指状态，真实光标位置由 CGEventTap 提供。
 private class ThreeFingerDragDetector: @unchecked Sendable {
-    weak var delegate: TrackpadSelectionDelegate?
-    let screenSize: CGSize
-    let screen: NSScreen
+    var onStart: (@Sendable () -> Void)?
+    var onEnd: (@Sendable () -> Void)?
     
     // MultitouchSupport 类型定义
     private typealias MTTouchCallback = @convention(c) (UnsafeMutableRawPointer, UnsafeMutableRawPointer, Int32, Double, Int32) -> Void
@@ -110,15 +108,9 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
     
     // 状态
     private var threeFingerDown = false
-    private var startNorm: CGPoint?      // 三指开始时的触控板坐标
-    private var startCursor: CGPoint?    // 三指开始时的光标位置（SwiftUI 坐标）
-    private var currentPoint: CGPoint?
     private var endCheckCount = 0
     
-    init(screenSize: CGSize, screen: NSScreen) {
-        self.screenSize = screenSize
-        self.screen = screen
-    }
+    init() {}
     
     func start() {
         let mtPath = "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
@@ -144,7 +136,7 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
         print("[3FDrag] 📱 Found \(deviceList.count) multitouch device(s)")
         
         for i in 0..<deviceList.count {
-            let device = deviceList[i] as! CFTypeRef
+            let device = deviceList[i] as CFTypeRef
             mtRegister(device, threeFingerDragCallback, nil, 0)
             mtStart(device, 0)
         }
@@ -154,27 +146,6 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
     
     func stop() { }
     
-    // MARK: - 坐标转换
-    
-    /// 触控板归一化坐标 → SwiftUI 坐标
-    /// MultitouchSupport: X(0=左,1=右), Y(0=顶,1=底)
-    /// SwiftUI: (0,0)=左上角, Y 向下
-    private func normalizedToSwiftUI(_ norm: CGPoint) -> CGPoint {
-        return CGPoint(
-            x: norm.x * screenSize.width,
-            y: (1 - norm.y) * screenSize.height
-        )
-    }
-    
-    private func calculateRect(from start: CGPoint, to end: CGPoint) -> CGRect {
-        return CGRect(
-            x: min(start.x, end.x),
-            y: min(start.y, end.y),
-            width: abs(end.x - start.x),
-            height: abs(end.y - start.y)
-        )
-    }
-    
     // MARK: - Touch Handler（后台线程）
     
     nonisolated func handleTouch(rawTouches: UnsafeMutableRawPointer, numTouches: Int32) {
@@ -183,16 +154,12 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
         
         var activeFingerCount = 0
         var allEnded = true
-        var sumX: Float = 0
-        var sumY: Float = 0
         
         for i in 0..<count {
             let t = touches[i]
             if t.state != 7 {
                 allEnded = false
                 activeFingerCount += 1
-                sumX += t.posX
-                sumY += t.posY
             }
         }
         
@@ -200,43 +167,12 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
         if activeFingerCount >= 3 && !threeFingerDown {
             threeFingerDown = true
             endCheckCount = 0
-            let norm = CGPoint(x: CGFloat(sumX / Float(activeFingerCount)),
-                               y: CGFloat(sumY / Float(activeFingerCount)))
-            startNorm = norm
-            // 读取当前光标位置作为锚点（AppKit → SwiftUI）
-            let cursor = NSEvent.mouseLocation
-            let screenFrame = screen.frame
-            let anchorX = cursor.x - screenFrame.origin.x
-            let anchorY = screenSize.height - (cursor.y - screenFrame.origin.y)
-            let anchor = CGPoint(x: anchorX, y: anchorY)
-            startCursor = anchor
-            currentPoint = anchor
-            writeDebugLog("[3FDrag] START norm=\(String(format:"%.3f,%.3f", norm.x, norm.y)) cursor=\(Int(cursor.x)),\(Int(cursor.y)) anchor=\(Int(anchor.x)),\(Int(anchor.y))\n")
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                let rect = self.calculateRect(from: anchor, to: anchor)
-                self.delegate?.selectionDidUpdate(rect)
-            }
+            DispatchQueue.main.async { [onStart] in onStart?() }
         }
         
-        // 三指移动中 - 用增量
+        // 三指移动由 CGEventTap 的 mouseMoved 事件处理。
         if threeFingerDown && activeFingerCount >= 3 {
             endCheckCount = 0
-            if let sn = startNorm, let sc = startCursor {
-                let norm = CGPoint(x: CGFloat(sumX / Float(activeFingerCount)),
-                                   y: CGFloat(sumY / Float(activeFingerCount)))
-                // 触控板增量 × 屏幕尺寸 = 屏幕位移
-                let dx = (norm.x - sn.x) * screenSize.width
-                let dy = -(norm.y - sn.y) * screenSize.height  // Y 轴反转
-                let swiftPos = CGPoint(x: sc.x + dx, y: sc.y + dy)
-                currentPoint = swiftPos
-                writeDebugLog("[3FDrag] MOVE delta=\(Int(dx)),\(Int(dy)) pos=\(Int(swiftPos.x)),\(Int(swiftPos.y))\n")
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    let rect = self.calculateRect(from: sc, to: swiftPos)
-                    self.delegate?.selectionDidUpdate(rect)
-                }
-            }
         }
         
         // 手指短暂减少（系统手势干扰）→ 延迟结束
@@ -256,30 +192,8 @@ private class ThreeFingerDragDetector: @unchecked Sendable {
     
     private func endDrag() {
         threeFingerDown = false
-        if let sc = startCursor, let end = currentPoint {
-            writeDebugLog("[3FDrag] END sel=(\(Int(sc.x)),\(Int(sc.y)))→(\(Int(end.x)),\(Int(end.y)))\n")
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                let rect = self.calculateRect(from: sc, to: end)
-                self.delegate?.selectionDidFinish(rect)
-            }
-        }
-        startNorm = nil
-        startCursor = nil
-        currentPoint = nil
+        DispatchQueue.main.async { [onEnd] in onEnd?() }
         endCheckCount = 0
-    }
-    
-    nonisolated private func writeDebugLog(_ line: String) {
-        if let data = line.data(using: .utf8) {
-            let fh = FileHandle(forWritingAtPath: "/tmp/3fdrag_debug.log") ?? {
-                FileManager.default.createFile(atPath: "/tmp/3fdrag_debug.log", contents: nil)
-                return FileHandle(forWritingAtPath: "/tmp/3fdrag_debug.log")!
-            }()
-            fh.seekToEndOfFile()
-            fh.write(data)
-            fh.closeFile()
-        }
     }
 }
 
@@ -310,19 +224,28 @@ private func threeFingerDragCallback(
 /// 支持触摸板滑动的 NSView
 class TrackpadSelectionNSView: NSView {
     weak var delegate: TrackpadSelectionDelegate? {
-        didSet {
-            dragDetector?.delegate = delegate
-        }
+        didSet {}
     }
     let screenSize: CGSize
     let screen: NSScreen
     
     private var dragDetector: ThreeFingerDragDetector?
+    private var mouseMoveTap: CFMachPort?
+    private var mouseMoveSource: CFRunLoopSource?
     
     // NSEvent fallback 状态
     private var isSelecting = false
+    private var pendingThreeFingerStart = false
     private var startPoint: CGPoint?
     private var currentPoint: CGPoint?
+    private var lastPointerScreenPoint: CGPoint?
+    private enum SelectionSource {
+        case none
+        case mouse
+        case touchFallback
+        case threeFinger
+    }
+    private var selectionSource: SelectionSource = .none
     
     init(screenSize: CGSize, screen: NSScreen) {
         self.screenSize = screenSize
@@ -332,7 +255,19 @@ class TrackpadSelectionNSView: NSView {
         self.layer?.backgroundColor = NSColor.clear.cgColor
         
         // 启用 MultitouchSupport 3 指拖动检测
-        let detector = ThreeFingerDragDetector(screenSize: screenSize, screen: screen)
+        startMouseMoveTap()
+
+        let detector = ThreeFingerDragDetector()
+        detector.onStart = { [weak self] in
+            Task { @MainActor in
+                self?.beginThreeFingerSelection()
+            }
+        }
+        detector.onEnd = { [weak self] in
+            Task { @MainActor in
+                self?.finishThreeFingerSelection()
+            }
+        }
         detector.start()
         self.dragDetector = detector
     }
@@ -343,30 +278,143 @@ class TrackpadSelectionNSView: NSView {
     
     deinit {
         dragDetector?.stop()
+        MainActor.assumeIsolated {
+            stopMouseMoveTap()
+        }
     }
     
     override var acceptsFirstResponder: Bool { true }
-    
+
     // MARK: - 坐标转换
     
     /// AppKit 屏幕坐标 → SwiftUI 坐标
-    /// AppKit: (0,0) = 屏幕左下角, Y 向上
     /// SwiftUI: (0,0) = 屏幕左上角, Y 向下
     private func screenToSwiftUI(_ screenPoint: CGPoint) -> CGPoint {
-        let screenHeight = screenSize.height
         return CGPoint(
             x: screenPoint.x - screen.frame.origin.x,
-            y: screenHeight - (screenPoint.y - screen.frame.origin.y)
+            y: screen.frame.origin.y + screenSize.height - screenPoint.y
         )
+    }
+
+    private func eventToSwiftUI(_ event: NSEvent) -> CGPoint {
+        let point = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: point.x, y: bounds.height - point.y)
     }
     
     private func calculateRect(from start: CGPoint, to end: CGPoint) -> CGRect {
-        return CGRect(
-            x: min(start.x, end.x),
-            y: min(start.y, end.y),
-            width: abs(end.x - start.x),
-            height: abs(end.y - start.y)
-        )
+        ScreenshotGeometry.normalizedRect(from: start, to: end)
+    }
+
+    // MARK: - CGEventTap mouse tracking for three-finger selection
+
+    private func startMouseMoveTap() {
+        let mask = CGEventMask(1 << CGEventType.mouseMoved.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDragged.rawValue)
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                if type == .tapDisabledByTimeout, let refcon {
+                    let view = Unmanaged<TrackpadSelectionNSView>.fromOpaque(refcon).takeUnretainedValue()
+                    if let tap = view.mouseMoveTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                let view = Unmanaged<TrackpadSelectionNSView>.fromOpaque(refcon).takeUnretainedValue()
+                let location = event.location
+                DispatchQueue.main.async { [weak view] in
+                    view?.handlePointerMoved(screenPoint: location)
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: selfPtr
+        ) else {
+            return
+        }
+
+        mouseMoveTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        mouseMoveSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func stopMouseMoveTap() {
+        if let source = mouseMoveSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            mouseMoveSource = nil
+        }
+        if let tap = mouseMoveTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            mouseMoveTap = nil
+        }
+    }
+
+    private func beginThreeFingerSelection() {
+        pendingThreeFingerStart = true
+        isSelecting = false
+        selectionSource = .none
+        startPoint = nil
+        currentPoint = nil
+        handlePointerMoved(screenPoint: latestPointerScreenPoint())
+    }
+
+    private func finishThreeFingerSelection() {
+        if selectionSource == .threeFinger {
+            handlePointerMoved(screenPoint: latestPointerScreenPoint())
+        }
+
+        guard !pendingThreeFingerStart else {
+            pendingThreeFingerStart = false
+            resetSelection()
+            delegate?.selectionDidCancel()
+            return
+        }
+        guard isSelecting, let start = startPoint, let end = currentPoint else {
+            resetSelection()
+            return
+        }
+
+        delegate?.selectionDidFinish(calculateRect(from: start, to: end))
+        resetSelection()
+    }
+
+    private func handlePointerMoved(screenPoint: CGPoint) {
+        lastPointerScreenPoint = screenPoint
+        guard pendingThreeFingerStart || selectionSource == .threeFinger else { return }
+        let swiftPoint = screenToSwiftUI(screenPoint)
+
+        if pendingThreeFingerStart {
+            pendingThreeFingerStart = false
+            isSelecting = true
+            selectionSource = .threeFinger
+            startPoint = swiftPoint
+            currentPoint = swiftPoint
+            delegate?.selectionDidUpdate(calculateRect(from: swiftPoint, to: swiftPoint))
+            return
+        }
+
+        guard isSelecting, let start = startPoint else { return }
+        currentPoint = swiftPoint
+        delegate?.selectionDidUpdate(calculateRect(from: start, to: swiftPoint))
+    }
+
+    private func latestPointerScreenPoint() -> CGPoint {
+        if let location = CGEvent(source: nil)?.location {
+            return location
+        }
+        if let lastPointerScreenPoint {
+            return lastPointerScreenPoint
+        }
+        return NSEvent.mouseLocation
     }
     
     // MARK: - NSEvent Touch Events（如果 MultitouchSupport 不可用时的备用）
@@ -375,21 +423,20 @@ class TrackpadSelectionNSView: NSView {
         let touches = event.touches(matching: .began, in: self)
         guard touches.first != nil else { return }
         
-        let screenPoint = NSEvent.mouseLocation
-        let swiftUILocation = screenToSwiftUI(screenPoint)
+        let swiftUILocation = eventToSwiftUI(event)
         startPoint = swiftUILocation
         currentPoint = swiftUILocation
         isSelecting = true
+        selectionSource = .touchFallback
         
         let rect = calculateRect(from: swiftUILocation, to: swiftUILocation)
         delegate?.selectionDidUpdate(rect)
     }
     
     override func touchesMoved(with event: NSEvent) {
-        guard isSelecting, let start = startPoint else { return }
+        guard selectionSource == .touchFallback, isSelecting, let start = startPoint else { return }
         
-        let screenPoint = NSEvent.mouseLocation
-        let swiftUILocation = screenToSwiftUI(screenPoint)
+        let swiftUILocation = eventToSwiftUI(event)
         currentPoint = swiftUILocation
         
         let rect = calculateRect(from: start, to: swiftUILocation)
@@ -397,7 +444,7 @@ class TrackpadSelectionNSView: NSView {
     }
     
     override func touchesEnded(with event: NSEvent) {
-        guard isSelecting, let start = startPoint, let end = currentPoint else {
+        guard selectionSource == .touchFallback, isSelecting, let start = startPoint, let end = currentPoint else {
             resetSelection()
             return
         }
@@ -415,34 +462,20 @@ class TrackpadSelectionNSView: NSView {
     // MARK: - 鼠标事件处理（备用，点击拖拽）
     
     override func mouseDown(with event: NSEvent) {
-        // 直接用屏幕坐标，避免 view 坐标转换误差
-        let screenPoint = NSEvent.mouseLocation
-        let swiftUILocation = screenToSwiftUI(screenPoint)
+        let swiftUILocation = eventToSwiftUI(event)
         startPoint = swiftUILocation
         currentPoint = swiftUILocation
         isSelecting = true
-        
-        // DEBUG
-        let debugLine = "[mouseDown] screen=(\(Int(screenPoint.x)),\(Int(screenPoint.y))) swiftUI=(\(Int(swiftUILocation.x)),\(Int(swiftUILocation.y))) screenOrigin=(\(Int(screen.frame.origin.x)),\(Int(screen.frame.origin.y))) screenSize=\(Int(screenSize.width))x\(Int(screenSize.height))\n"
-        if let data = debugLine.data(using: .utf8) {
-            let fh = FileHandle(forWritingAtPath: "/tmp/screenshot_coord_debug.log") ?? {
-                FileManager.default.createFile(atPath: "/tmp/screenshot_coord_debug.log", contents: nil)
-                return FileHandle(forWritingAtPath: "/tmp/screenshot_coord_debug.log")!
-            }()
-            fh.seekToEndOfFile()
-            fh.write(data)
-            fh.closeFile()
-        }
+        selectionSource = .mouse
         
         let rect = calculateRect(from: swiftUILocation, to: swiftUILocation)
         delegate?.selectionDidUpdate(rect)
     }
     
     override func mouseDragged(with event: NSEvent) {
-        guard isSelecting, let start = startPoint else { return }
+        guard selectionSource == .mouse, isSelecting, let start = startPoint else { return }
         
-        let screenPoint = NSEvent.mouseLocation
-        let swiftUILocation = screenToSwiftUI(screenPoint)
+        let swiftUILocation = eventToSwiftUI(event)
         currentPoint = swiftUILocation
         
         let rect = calculateRect(from: start, to: swiftUILocation)
@@ -450,7 +483,7 @@ class TrackpadSelectionNSView: NSView {
     }
     
     override func mouseUp(with event: NSEvent) {
-        guard isSelecting, let start = startPoint, let end = currentPoint else {
+        guard selectionSource == .mouse, isSelecting, let start = startPoint, let end = currentPoint else {
             resetSelection()
             return
         }
@@ -462,6 +495,8 @@ class TrackpadSelectionNSView: NSView {
     
     private func resetSelection() {
         isSelecting = false
+        pendingThreeFingerStart = false
+        selectionSource = .none
         startPoint = nil
         currentPoint = nil
     }

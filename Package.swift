@@ -21,6 +21,11 @@ let package = Package(
                     "-Xlinker", "Sources/Resources/Info.plist"
                 ])
             ]
+        ),
+        .testTarget(
+            name: "MacToolkitTests",
+            dependencies: ["MacToolkit"],
+            path: "Tests/MacToolkitTests"
         )
     ]
 )

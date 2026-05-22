@@ -84,7 +84,7 @@ class ScreenshotModule: ToolkitModule {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,  // 使用 session 级别，不干扰 HID
             place: .headInsertEventTap,
-            options: .listenOnly,  // 被动监听，不拦截事件
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
             callback: { proxy, type, event, refcon -> Unmanaged<CGEvent>? in
                 // 处理 tap 被禁用的情况
@@ -99,7 +99,7 @@ class ScreenshotModule: ToolkitModule {
                 }
                 
                 guard let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 
                 let module = Unmanaged<ScreenshotModule>.fromOpaque(refcon).takeUnretainedValue()
@@ -109,13 +109,11 @@ class ScreenshotModule: ToolkitModule {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                     
                     if module.handleKeyEvent(keyCode: keyCode, flags: flags) {
-                        // 由于是 listenOnly，不能吞噬事件
-                        // 但我们可以发送一个新的事件来覆盖
-                        return Unmanaged.passRetained(event)
+                        return nil
                     }
                 }
                 
-                return Unmanaged.passRetained(event)
+                return Unmanaged.passUnretained(event)
             },
             userInfo: selfPtr
         ) else {
@@ -148,14 +146,10 @@ class ScreenshotModule: ToolkitModule {
         let hotkey = viewModel.config.hotkey
         let nsFlags = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
         
-        // 处理 Escape 键 - 当覆盖层显示时退出
-        if keyCode == 53 && viewModel.isShowingOverlay {
-            print("[ScreenshotModule] Escape pressed while overlay is showing")
-            viewModel.cancel()
+        if viewModel.handleShortcut(keyCode: keyCode, flags: flags) {
             return true
         }
         
-        // 处理截图快捷键
         if Int64(hotkey.keyCode) == keyCode {
             let relevantFlags = nsFlags.intersection([.command, .option, .control, .shift])
             if relevantFlags == hotkey.modifiers {

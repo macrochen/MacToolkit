@@ -35,6 +35,7 @@ class ExportService {
     }
     
     /// 弹出保存对话框
+    @MainActor
     static func showSavePanel(image: NSImage, defaultDirectory: URL) -> URL? {
         let panel = NSSavePanel()
         panel.title = "保存截图"

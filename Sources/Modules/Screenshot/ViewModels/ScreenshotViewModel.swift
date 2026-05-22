@@ -1,515 +1,300 @@
-import SwiftUI
+import AppKit
 import Combine
+import SwiftUI
 
-/// 截图状态
 enum ScreenshotState: Equatable {
     case idle
-    case selecting        // 正在选区
-    case selected         // 选区确定
-    case annotating       // 标注中
-    case ocrLoading       // OCR 识别中
-    case ocrResult(text: String)  // OCR 结果展示
-    
-    static func == (lhs: ScreenshotState, rhs: ScreenshotState) -> Bool {
-        switch (lhs, rhs) {
-        case (.idle, .idle), (.selecting, .selecting), (.selected, .selected),
-             (.annotating, .annotating), (.ocrLoading, .ocrLoading):
-            return true
-        case (.ocrResult(let t1), .ocrResult(let t2)):
-            return t1 == t2
-        default:
-            return false
-        }
-    }
+    case selecting
+    case selected
+    case annotating
+    case ocrLoading
+    case ocrResult(text: String)
 }
 
-/// 截图流程状态管理
 @MainActor
-class ScreenshotViewModel: ObservableObject {
-    // MARK: - 状态
+final class ScreenshotViewModel: ObservableObject {
     @Published var state: ScreenshotState = .idle
     @Published var selection: CGRect = .zero
     @Published var capturedImage: CGImage?
-    
-    // MARK: - 配置
+    @Published var activeScreenSize: CGSize = .zero
+
     @Published var config = CaptureConfig()
-    
-    // MARK: - 标注
     @Published var annotationEngine = AnnotationEngine()
     @Published var currentTool: AnnotationType?
-    
-    // MARK: - 内部状态
+    @Published var annotationPreviewPoints: [CGPoint] = []
+    @Published var pendingTextPoint: CGPoint?
+    @Published var textDraft = ""
+
     @Published var isShowingOverlay = false
     @Published var toastMessage: String?
     @Published var isShowingToast = false
-    
-    // MARK: - 覆盖层控制回调（由 ScreenshotModule 设置）
+
     var onHideOverlay: (() -> Void)?
     var onShowOverlay: (() -> Void)?
-    
-    // MARK: - 选区调整相关
-    enum ResizeHandle: CaseIterable {
-        case none, nw, n, ne, e, se, s, sw, w
-        
-        static var allCases: [ResizeHandle] {
-            return [.nw, .n, .ne, .e, .se, .s, .sw, .w]
-        }
-    }
-    @Published var activeHandle: ResizeHandle = .none
-    @Published var isDragging = false
-    
-    // MARK: - 安全超时
+
     private var safetyTimer: Timer?
-    private let safetyTimeout: TimeInterval = 300 // 5分钟超时自动关闭
-    
-    // MARK: - 操作
-    
-    /// 开始截图
-    func startCapture() {
+    private var ocrRequestID = UUID()
+    private var cancellables = Set<AnyCancellable>()
+    private let safetyTimeout: TimeInterval = 300
+    private let minimumSelectionSize = CGSize(width: 20, height: 20)
+
+    init() {
+        annotationEngine.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+    }
+
+    var hasUsableSelection: Bool {
+        selection.width >= minimumSelectionSize.width && selection.height >= minimumSelectionSize.height
+    }
+
+    func startCapture(screen: NSScreen = .main ?? NSScreen.screens[0]) {
         guard ScreenCaptureService.checkPermission() else {
             ScreenCaptureService.requestPermission()
             return
         }
-        
-        capturedImage = ScreenCaptureService.captureFullScreen()
+
+        guard let image = ScreenCaptureService.captureScreen(screen) else {
+            showToast("截图失败")
+            return
+        }
+
+        capturedImage = image
+        activeScreenSize = screen.frame.size
+        selection = .zero
+        annotationEngine.clearAll()
+        annotationPreviewPoints = []
+        currentTool = nil
+        pendingTextPoint = nil
+        textDraft = ""
         state = .selecting
         isShowingOverlay = true
-        selection = .zero
-        
-        // 启动安全超时
         startSafetyTimer()
     }
-    
-    /// 完成选区
+
+    func updateSelection(_ rect: CGRect) {
+        ocrRequestID = UUID()
+        selection = clamped(rect)
+    }
+
     func finishSelection() {
-        guard selection.width >= 20 && selection.height >= 20 else {
-            // 选区太小，重置
+        guard hasUsableSelection else {
             resetSelection()
             return
         }
+        currentTool = nil
+        annotationPreviewPoints = []
+        pendingTextPoint = nil
+        textDraft = ""
         state = .selected
     }
-    
-    /// 重置选区
+
     func resetSelection() {
         selection = .zero
+        currentTool = nil
+        annotationPreviewPoints = []
+        pendingTextPoint = nil
+        textDraft = ""
+        annotationEngine.clearAll()
         state = .selecting
     }
-    
-    /// 进入标注模式
+
+    func moveSelection(from original: CGRect, translation: CGSize) {
+        ocrRequestID = UUID()
+        selection = ScreenshotGeometry.movedSelection(
+            original,
+            translation: translation,
+            bounds: activeScreenSize
+        )
+    }
+
+    func resizeSelection(from original: CGRect, handle: ScreenshotResizeHandle, translation: CGSize) {
+        ocrRequestID = UUID()
+        selection = ScreenshotGeometry.resizedSelection(
+            original,
+            handle: handle,
+            translation: translation,
+            bounds: activeScreenSize,
+            minimumSize: minimumSelectionSize
+        )
+    }
+
     func enterAnnotationMode() {
+        guard hasUsableSelection else { return }
         state = .annotating
     }
-    
-    /// 设置当前工具
+
     func setTool(_ tool: AnnotationType?) {
+        if currentTool == tool {
+            currentTool = nil
+            annotationPreviewPoints = []
+            pendingTextPoint = nil
+            textDraft = ""
+            state = .selected
+            return
+        }
+
         currentTool = tool
+        if tool != nil {
+            enterAnnotationMode()
+        }
     }
-    
-    /// 撤销
+
+    func addTextAnnotation(at point: CGPoint, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        annotationEngine.add(annotationEngine.createText(at: point, text: trimmed))
+    }
+
+    func beginTextAnnotation(at point: CGPoint) {
+        pendingTextPoint = point
+        textDraft = ""
+    }
+
+    func commitTextAnnotation() {
+        guard let point = pendingTextPoint else { return }
+        addTextAnnotation(at: point, text: textDraft)
+        pendingTextPoint = nil
+        textDraft = ""
+    }
+
+    func cancelTextAnnotation() {
+        pendingTextPoint = nil
+        textDraft = ""
+    }
+
     func undo() {
         annotationEngine.undo()
     }
-    
-    // MARK: - OCR
-    
-    /// 执行 OCR 识别
+
     func performOCR() {
-        guard let image = capturedImage else { return }
-        
-        // 裁剪选区图片
-        guard let croppedImage = image.cropping(to: selection) else { return }
-        
+        let requestID = UUID()
+        ocrRequestID = requestID
+        let selectionSnapshot = selection
+        let screenSizeSnapshot = activeScreenSize
+
+        guard let image = capturedImage,
+              hasUsableSelection,
+              let croppedImage = AnnotationRenderer.cropForOCR(
+                baseImage: image,
+                selection: selectionSnapshot,
+                screenSize: screenSizeSnapshot
+              ) else {
+            return
+        }
+
         state = .ocrLoading
-        
         Task {
             do {
                 let text = try await OCRService.recognizeText(in: croppedImage)
+                guard self.ocrRequestID == requestID, self.selection == selectionSnapshot else { return }
                 state = .ocrResult(text: text)
             } catch {
+                guard self.ocrRequestID == requestID, self.selection == selectionSnapshot else { return }
                 state = .ocrResult(text: "识别失败: \(error.localizedDescription)")
             }
         }
     }
-    
-    /// 复制 OCR 文字到剪贴板
+
     func copyOCRText(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
         showToast("已复制文字")
     }
-    
-    /// 关闭 OCR 面板
+
     func closeOCRPanel() {
-        state = .annotating
+        state = currentTool == nil ? .selected : .annotating
     }
-    
-    // MARK: - 保存
-    
-    /// 保存到剪贴板
+
     func saveToClipboard() {
         guard let image = renderFinalImage() else { return }
         ExportService.copyToClipboard(image)
         showToast("已复制到剪贴板")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
             self.closeOverlay()
         }
     }
-    
-    /// 保存到文件
+
     func saveToFile() {
         guard let image = renderFinalImage() else { return }
-        
-        // 先隐藏覆盖层，避免遮挡保存对话框
+
         onHideOverlay?()
-        
         if let url = ExportService.showSavePanel(image: image, defaultDirectory: config.saveDirectory) {
             showToast("已保存到 \(url.lastPathComponent)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                 self.closeOverlay()
             }
         } else {
-            // 用户取消了保存，重新显示覆盖层
             onShowOverlay?()
         }
     }
-    
-    // MARK: - 渲染
-    
-    /// 渲染最终图片（根据选区裁剪 + 标注）
+
     func renderFinalImage() -> NSImage? {
-        guard let cgImage = capturedImage else { return nil }
-        
-        // 确保选区有效
-        guard selection.width > 0 && selection.height > 0 else {
-            print("[ScreenshotViewModel] ❌ Invalid selection: \(selection)")
-            return nil
-        }
-        
-        // 将选区坐标从 SwiftUI 坐标系（左上角原点）转换为 CGImage 坐标系（左下角原点）
-        let screenHeight = CGFloat(cgImage.height)
-        let scaleX = CGFloat(cgImage.width) / NSScreen.main!.frame.width
-        let scaleY = CGFloat(cgImage.height) / NSScreen.main!.frame.height
-        
-        // 转换选区坐标到图片坐标系
-        let imageSelection = CGRect(
-            x: selection.origin.x * scaleX,
-            y: (screenHeight - (selection.origin.y + selection.height) * scaleY),
-            width: selection.width * scaleX,
-            height: selection.height * scaleY
+        guard let image = capturedImage, hasUsableSelection else { return nil }
+        return AnnotationRenderer.render(
+            baseImage: image,
+            selection: selection,
+            screenSize: activeScreenSize,
+            annotations: annotationEngine.annotations
         )
-        
-        print("[ScreenshotViewModel] Selection in SwiftUI coords: \(selection)")
-        print("[ScreenshotViewModel] Selection in image coords: \(imageSelection)")
-        print("[ScreenshotViewModel] Image size: \(cgImage.width) x \(cgImage.height)")
-        
-        // 裁剪图片到选区
-        guard let croppedCGImage = cgImage.cropping(to: imageSelection) else {
-            print("[ScreenshotViewModel] ❌ Failed to crop image")
-            return nil
-        }
-        
-        let croppedImage = ExportService.nsImage(from: croppedCGImage)
-        let croppedSize = NSSize(width: croppedCGImage.width, height: croppedCGImage.height)
-        
-        // 创建位图上下文绘制裁剪后的图片 + 标注
-        let bitmapRep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                          pixelsWide: Int(croppedSize.width),
-                                          pixelsHigh: Int(croppedSize.height),
-                                          bitsPerSample: 8,
-                                          samplesPerPixel: 4,
-                                          hasAlpha: true,
-                                          isPlanar: false,
-                                          colorSpaceName: .deviceRGB,
-                                          bytesPerRow: 0,
-                                          bitsPerPixel: 0)
-        
-        guard let bitmapRep = bitmapRep else { return nil }
-        
-        let context = NSGraphicsContext(bitmapImageRep: bitmapRep)
-        guard let context = context else { return nil }
-        
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        
-        // 绘制裁剪后的图片
-        croppedImage.draw(in: NSRect(origin: .zero, size: croppedSize))
-        
-        // 绘制标注（需要调整坐标，因为原点变了）
-        drawAnnotationsForCroppedImage(in: context, imageSize: croppedSize)
-        
-        NSGraphicsContext.restoreGraphicsState()
-        
-        guard let finalImage = bitmapRep.cgImage else { return nil }
-        return ExportService.nsImage(from: finalImage)
     }
-    
-    /// 绘制标注到裁剪后的图片
-    private func drawAnnotationsForCroppedImage(in context: NSGraphicsContext, imageSize: NSSize) {
-        guard let cgImage = capturedImage else { return }
-        
-        let scaleX = CGFloat(cgImage.width) / NSScreen.main!.frame.width
-        let scaleY = CGFloat(cgImage.height) / NSScreen.main!.frame.height
-        
-        // 计算选区在图片坐标系中的位置
-        let screenHeight = CGFloat(cgImage.height)
-        let imageSelection = CGRect(
-            x: selection.origin.x * scaleX,
-            y: (screenHeight - (selection.origin.y + selection.height) * scaleY),
-            width: selection.width * scaleX,
-            height: selection.height * scaleY
-        )
-        
-        for annotation in annotationEngine.annotations {
-            // 转换标注点坐标到裁剪后的图片坐标系
-            let convertedPoints = annotation.points.map { point -> CGPoint in
-                let imagePoint = CGPoint(
-                    x: point.x * scaleX,
-                    y: screenHeight - point.y * scaleY
-                )
-                // 相对于裁剪区域的坐标
-                return CGPoint(
-                    x: imagePoint.x - imageSelection.origin.x,
-                    y: imagePoint.y - imageSelection.origin.y
-                )
-            }
-            
-            switch annotation.type {
-            case .rect:
-                drawRectWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
-            case .arrow:
-                drawArrowWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
-            case .freehand:
-                drawFreehandWithPoints(convertedPoints, color: annotation.color, lineWidth: annotation.lineWidth)
-            case .text:
-                if let text = annotation.text, let position = convertedPoints.first {
-                    drawTextAtPoint(text, position: position, color: annotation.color)
-                }
-            case .mosaic:
-                drawMosaicWithPoints(convertedPoints)
+
+    func handleShortcut(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        guard isShowingOverlay else { return false }
+
+        if keyCode == 53 {
+            cancel()
+            return true
+        }
+
+        let nsFlags = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
+        let commandDown = nsFlags.contains(.command)
+
+        if commandDown {
+            switch keyCode {
+            case 6:
+                undo()
+                return true
+            case 8:
+                saveToClipboard()
+                return true
+            case 1:
+                saveToFile()
+                return true
+            case 31:
+                performOCR()
+                return true
+            default:
+                break
             }
         }
-    }
-    
-    /// 绘制标注到上下文
-    private func drawAnnotations(in context: NSGraphicsContext, size: NSSize) {
-        for annotation in annotationEngine.annotations {
-            switch annotation.type {
-            case .rect:
-                drawRect(annotation, in: context)
-            case .arrow:
-                drawArrow(annotation, in: context)
-            case .freehand:
-                drawFreehand(annotation, in: context)
-            case .text:
-                drawText(annotation, in: context)
-            case .mosaic:
-                drawMosaic(annotation, in: context)
-            }
+
+        switch keyCode {
+        case 36:
+            saveToClipboard()
+            return true
+        case 15:
+            setTool(.rect)
+            return true
+        case 0:
+            setTool(.arrow)
+            return true
+        case 35:
+            setTool(.freehand)
+            return true
+        case 17:
+            setTool(.text)
+            return true
+        case 46:
+            setTool(.mosaic)
+            return true
+        default:
+            return false
         }
     }
-    
-    private func drawRect(_ annotation: Annotation, in context: NSGraphicsContext) {
-        guard annotation.points.count >= 2 else { return }
-        let start = annotation.points[0]
-        let end = annotation.points[1]
-        let rect = CGRect(x: min(start.x, end.x),
-                          y: min(start.y, end.y),
-                          width: abs(end.x - start.x),
-                          height: abs(end.y - start.y))
-        
-        let path = NSBezierPath(rect: rect)
-        path.lineWidth = annotation.lineWidth
-        NSColor(annotation.color).setStroke()
-        path.stroke()
-    }
-    
-    private func drawArrow(_ annotation: Annotation, in context: NSGraphicsContext) {
-        guard annotation.points.count >= 2 else { return }
-        let start = annotation.points[0]
-        let end = annotation.points[1]
-        
-        let path = NSBezierPath()
-        path.move(to: start)
-        path.line(to: end)
-        path.lineWidth = annotation.lineWidth
-        NSColor(annotation.color).setStroke()
-        path.stroke()
-        
-        // 箭头头部
-        let angle = atan2(end.y - start.y, end.x - start.x)
-        let arrowLength: CGFloat = 12
-        let arrowAngle: CGFloat = .pi / 6
-        
-        let arrow1 = CGPoint(x: end.x - arrowLength * cos(angle - arrowAngle),
-                             y: end.y - arrowLength * sin(angle - arrowAngle))
-        let arrow2 = CGPoint(x: end.x - arrowLength * cos(angle + arrowAngle),
-                             y: end.y - arrowLength * sin(angle + arrowAngle))
-        
-        let arrowPath = NSBezierPath()
-        arrowPath.move(to: end)
-        arrowPath.line(to: arrow1)
-        arrowPath.move(to: end)
-        arrowPath.line(to: arrow2)
-        arrowPath.lineWidth = annotation.lineWidth
-        arrowPath.stroke()
-    }
-    
-    private func drawFreehand(_ annotation: Annotation, in context: NSGraphicsContext) {
-        guard annotation.points.count >= 2 else { return }
-        
-        let path = NSBezierPath()
-        path.move(to: annotation.points[0])
-        for point in annotation.points.dropFirst() {
-            path.line(to: point)
-        }
-        path.lineWidth = annotation.lineWidth
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        NSColor(annotation.color).setStroke()
-        path.stroke()
-    }
-    
-    private func drawText(_ annotation: Annotation, in context: NSGraphicsContext) {
-        guard let text = annotation.text, let position = annotation.points.first else { return }
-        
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 16),
-            .foregroundColor: annotation.color
-        ]
-        let nsString = text as NSString
-        nsString.draw(at: position, withAttributes: attributes)
-    }
-    
-    private func drawMosaic(_ annotation: Annotation, in context: NSGraphicsContext) {
-        guard annotation.points.count >= 2 else { return }
-        let start = annotation.points[0]
-        let end = annotation.points[1]
-        let rect = CGRect(x: min(start.x, end.x),
-                          y: min(start.y, end.y),
-                          width: abs(end.x - start.x),
-                          height: abs(end.y - start.y))
-        
-        // 简单的马赛克效果：用半透明矩形填充
-        let mosaicSize: CGFloat = 10
-        NSColor.white.setFill()
-        
-        var x = rect.minX
-        while x < rect.maxX {
-            var y = rect.minY
-            while y < rect.maxY {
-                let blockRect = CGRect(x: x, y: y,
-                                       width: min(mosaicSize, rect.maxX - x),
-                                       height: min(mosaicSize, rect.maxY - y))
-                NSBezierPath(rect: blockRect).fill()
-                y += mosaicSize
-            }
-            x += mosaicSize
-        }
-    }
-    
-    // MARK: - 标注绘制辅助方法（用于裁剪后的图片）
-    
-    private func drawRectWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
-        guard points.count >= 2 else { return }
-        let start = points[0]
-        let end = points[1]
-        let rect = CGRect(x: min(start.x, end.x),
-                          y: min(start.y, end.y),
-                          width: abs(end.x - start.x),
-                          height: abs(end.y - start.y))
-        
-        let path = NSBezierPath(rect: rect)
-        path.lineWidth = lineWidth
-        NSColor(color).setStroke()
-        path.stroke()
-    }
-    
-    private func drawArrowWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
-        guard points.count >= 2 else { return }
-        let start = points[0]
-        let end = points[1]
-        
-        let path = NSBezierPath()
-        path.move(to: start)
-        path.line(to: end)
-        path.lineWidth = lineWidth
-        NSColor(color).setStroke()
-        path.stroke()
-        
-        // 箭头头部
-        let angle = atan2(end.y - start.y, end.x - start.x)
-        let arrowLength: CGFloat = 12
-        let arrowAngle: CGFloat = .pi / 6
-        
-        let arrow1 = CGPoint(x: end.x - arrowLength * cos(angle - arrowAngle),
-                             y: end.y - arrowLength * sin(angle - arrowAngle))
-        let arrow2 = CGPoint(x: end.x - arrowLength * cos(angle + arrowAngle),
-                             y: end.y - arrowLength * sin(angle + arrowAngle))
-        
-        let arrowPath = NSBezierPath()
-        arrowPath.move(to: end)
-        arrowPath.line(to: arrow1)
-        arrowPath.move(to: end)
-        arrowPath.line(to: arrow2)
-        arrowPath.lineWidth = lineWidth
-        arrowPath.stroke()
-    }
-    
-    private func drawFreehandWithPoints(_ points: [CGPoint], color: Color, lineWidth: CGFloat) {
-        guard points.count >= 2 else { return }
-        
-        let path = NSBezierPath()
-        path.move(to: points[0])
-        for point in points.dropFirst() {
-            path.line(to: point)
-        }
-        path.lineWidth = lineWidth
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        NSColor(color).setStroke()
-        path.stroke()
-    }
-    
-    private func drawTextAtPoint(_ text: String, position: CGPoint, color: Color) {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 16),
-            .foregroundColor: NSColor(color)
-        ]
-        let nsString = text as NSString
-        nsString.draw(at: position, withAttributes: attributes)
-    }
-    
-    private func drawMosaicWithPoints(_ points: [CGPoint]) {
-        guard points.count >= 2 else { return }
-        let start = points[0]
-        let end = points[1]
-        let rect = CGRect(x: min(start.x, end.x),
-                          y: min(start.y, end.y),
-                          width: abs(end.x - start.x),
-                          height: abs(end.y - start.y))
-        
-        // 简单的马赛克效果：用半透明矩形填充
-        let mosaicSize: CGFloat = 10
-        NSColor.white.setFill()
-        
-        var x = rect.minX
-        while x < rect.maxX {
-            var y = rect.minY
-            while y < rect.maxY {
-                let blockRect = CGRect(x: x, y: y,
-                                       width: min(mosaicSize, rect.maxX - x),
-                                       height: min(mosaicSize, rect.maxY - y))
-                NSBezierPath(rect: blockRect).fill()
-                y += mosaicSize
-            }
-            x += mosaicSize
-        }
-    }
-    
-    // MARK: - Toast
-    
+
     func showToast(_ message: String) {
         toastMessage = message
         isShowingToast = true
@@ -518,40 +303,49 @@ class ScreenshotViewModel: ObservableObject {
             self.toastMessage = nil
         }
     }
-    
-    // MARK: - 关闭
-    
+
     func closeOverlay() {
-        // 取消安全超时
         cancelSafetyTimer()
-        
         isShowingOverlay = false
         state = .idle
         selection = .zero
+        activeScreenSize = .zero
         capturedImage = nil
         annotationEngine.clearAll()
         currentTool = nil
+        annotationPreviewPoints = []
+        pendingTextPoint = nil
+        textDraft = ""
     }
-    
-    // MARK: - 取消
-    
+
     func cancel() {
-        print("[ScreenshotViewModel] Cancel called")
         closeOverlay()
     }
-    
-    // MARK: - 安全超时机制
-    
+
+    private func clamped(_ rect: CGRect) -> CGRect {
+        guard activeScreenSize.width > 0, activeScreenSize.height > 0 else { return rect }
+        let normalized = rect.standardized
+        let x = max(0, min(normalized.origin.x, activeScreenSize.width))
+        let y = max(0, min(normalized.origin.y, activeScreenSize.height))
+        let maxWidth = activeScreenSize.width - x
+        let maxHeight = activeScreenSize.height - y
+        return CGRect(
+            x: x,
+            y: y,
+            width: max(0, min(normalized.width, maxWidth)),
+            height: max(0, min(normalized.height, maxHeight))
+        )
+    }
+
     private func startSafetyTimer() {
         cancelSafetyTimer()
         safetyTimer = Timer.scheduledTimer(withTimeInterval: safetyTimeout, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
-                print("[ScreenshotViewModel] ⚠️ Safety timeout reached, force closing overlay")
                 self?.closeOverlay()
             }
         }
     }
-    
+
     private func cancelSafetyTimer() {
         safetyTimer?.invalidate()
         safetyTimer = nil

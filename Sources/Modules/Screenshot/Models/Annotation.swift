@@ -15,7 +15,7 @@ enum AnnotationType: String, CaseIterable, Identifiable {
         case .rect: return "rectangle"
         case .arrow: return "arrow.up.right"
         case .freehand: return "pencil"
-        case .text: return "text"
+        case .text: return "textformat"
         case .mosaic: return "square.grid.3x3"
         }
     }

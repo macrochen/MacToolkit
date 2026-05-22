@@ -18,7 +18,6 @@ struct AnnotationToolbar: View {
                     isSelected: viewModel.currentTool == tool
                 ) {
                     viewModel.setTool(tool)
-                    viewModel.enterAnnotationMode()
                 }
             }
             
@@ -164,7 +163,6 @@ extension ScreenshotOverlay {
             // 工具快捷键
             if let tool = AnnotationType.allCases.first(where: { $0.shortcut.lowercased() == key.lowercased() }) {
                 viewModel.setTool(tool)
-                viewModel.enterAnnotationMode()
                 return true
             }
         }

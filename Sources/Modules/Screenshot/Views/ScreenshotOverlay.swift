@@ -18,23 +18,51 @@ struct ScreenshotOverlay: View {
                     viewModel.cancel()
                 }
             
-            // 选区
+            if viewModel.selection.width > 0 && viewModel.selection.height > 0 {
+                AnnotationPreviewView(viewModel: viewModel)
+                    .frame(width: viewModel.selection.width, height: viewModel.selection.height)
+                    .position(x: viewModel.selection.midX, y: viewModel.selection.midY)
+                    .clipped()
+            }
+
+            if viewModel.state == .annotating, viewModel.currentTool != nil {
+                AnnotationDrawView(viewModel: viewModel, selectionRect: viewModel.selection)
+                    .frame(width: viewModel.selection.width, height: viewModel.selection.height)
+                    .position(x: viewModel.selection.midX, y: viewModel.selection.midY)
+                    .zIndex(30)
+            }
+
+            if let textPoint = viewModel.pendingTextPoint {
+                TextAnnotationPanel(
+                    viewModel: viewModel,
+                    initialPosition: textPanelPosition(for: textPoint, screenSize: screenSize),
+                    screenSize: screenSize
+                )
+                .id("\(textPoint.x)-\(textPoint.y)")
+                .zIndex(80)
+            }
+
             if viewModel.state != .idle {
                 SelectionView(viewModel: viewModel, screenSize: screenSize, screen: screen)
+                    .zIndex(50)
             }
             
             // 标注工具栏
             if viewModel.state == .selected || viewModel.state == .annotating {
                 AnnotationToolbar(viewModel: viewModel)
-                    .position(x: viewModel.selection.midX,
-                              y: viewModel.selection.maxY + 30)
+                    .position(toolbarPosition(screenSize: screenSize))
+                    .zIndex(60)
             }
             
             // OCR 结果面板
             if case .ocrResult(let text) = viewModel.state {
-                OCRResultPanel(text: text, viewModel: viewModel)
-                    .position(x: viewModel.selection.maxX + 150,
-                              y: viewModel.selection.midY)
+                OCRResultPanel(
+                    text: text,
+                    viewModel: viewModel,
+                    initialPosition: ocrPanelPosition(screenSize: screenSize),
+                    screenSize: screenSize
+                )
+                .zIndex(70)
             }
             
             // OCR Loading
@@ -90,6 +118,67 @@ struct ScreenshotOverlay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 注意：不在这里处理 Escape 键，由 CGEvent tap 统一处理
         // 避免与 NSApp 的 Escape 键处理冲突
+    }
+
+    private func toolbarPosition(screenSize: CGSize) -> CGPoint {
+        let x = min(max(viewModel.selection.midX, 220), max(220, screenSize.width - 220))
+        let preferredY = viewModel.selection.maxY + 34
+        let y = preferredY < screenSize.height - 28 ? preferredY : max(28, viewModel.selection.minY - 34)
+        return CGPoint(x: x, y: y)
+    }
+
+    private func ocrPanelPosition(screenSize: CGSize) -> CGPoint {
+        let x = viewModel.selection.maxX + 230 < screenSize.width
+            ? viewModel.selection.maxX + 230
+            : max(220, viewModel.selection.minX - 230)
+        let y = min(max(viewModel.selection.midY, 170), max(170, screenSize.height - 170))
+        return CGPoint(x: x, y: y)
+    }
+
+    private func textPanelPosition(for point: CGPoint, screenSize: CGSize) -> CGPoint {
+        let globalPoint = CGPoint(x: viewModel.selection.minX + point.x, y: viewModel.selection.minY + point.y)
+        let preferred = CGPoint(x: globalPoint.x + 185, y: globalPoint.y + 120)
+        return CGPoint(
+            x: min(max(preferred.x, 185), max(185, screenSize.width - 185)),
+            y: min(max(preferred.y, 110), max(110, screenSize.height - 110))
+        )
+    }
+}
+
+// MARK: - 标注层
+
+struct AnnotationLayer: View {
+    @ObservedObject var viewModel: ScreenshotViewModel
+    let currentTool: AnnotationType
+    
+    var body: some View {
+        ZStack {
+            // 标注预览（渲染已完成和正在绘制的标注）
+            AnnotationPreviewView(viewModel: viewModel)
+                .frame(
+                    width: viewModel.selection.width,
+                    height: viewModel.selection.height
+                )
+                .position(
+                    x: viewModel.selection.midX,
+                    y: viewModel.selection.midY
+                )
+                .clipped()
+            
+            // 标注绘制区域（接收鼠标事件）
+            AnnotationDrawView(
+                viewModel: viewModel,
+                selectionRect: viewModel.selection
+            )
+            .frame(
+                width: viewModel.selection.width,
+                height: viewModel.selection.height
+            )
+            .position(
+                x: viewModel.selection.midX,
+                y: viewModel.selection.midY
+            )
+        }
     }
 }
 

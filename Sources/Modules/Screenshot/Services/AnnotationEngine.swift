@@ -43,10 +43,10 @@ class AnnotationEngine: ObservableObject {
     func createFreehand(points: [CGPoint]) -> Annotation {
         Annotation(type: .freehand, points: points, color: currentColor, lineWidth: currentLineWidth)
     }
-    
+
     /// 创建文字标注
-    func createText(position: CGPoint, text: String) -> Annotation {
-        Annotation(type: .text, points: [position], text: text, color: currentColor, lineWidth: currentLineWidth)
+    func createText(at point: CGPoint, text: String) -> Annotation {
+        Annotation(type: .text, points: [point], text: text, color: currentColor, lineWidth: currentLineWidth)
     }
     
     /// 创建马赛克标注
