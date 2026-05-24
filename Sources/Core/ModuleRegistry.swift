@@ -15,7 +15,6 @@ class ModuleRegistry: ObservableObject {
             TextSnippetModule(),
             StandUpTimerModule(),
             MouseKeyMapperModule(),
-            FinderDockHelperModule(),
             TouchpadGestureHelperModule(),
             ScreenshotModule(),
         ]

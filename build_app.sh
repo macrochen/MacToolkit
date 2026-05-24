@@ -11,6 +11,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/.build"
 APP_DIR="$SCRIPT_DIR/dist/$APP_NAME.app"
 
+echo "🛑 正在关闭已运行的 $APP_NAME..."
+# 尝试优雅关闭
+osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
+sleep 0.5
+# 强制结束残留进程
+killall "$BUNDLE_NAME" 2>/dev/null || true
+
 # SPM 资源 bundle 路径（arm64 架构）
 RESOURCE_BUNDLE="$BUILD_DIR/arm64-apple-macosx/$BUILD_CONFIG/${BUNDLE_NAME}_${BUNDLE_NAME}.bundle"
 
@@ -64,10 +71,6 @@ echo "✅ 打包完成!"
 echo "   📍 $APP_DIR"
 echo "   📏 大小: $APP_SIZE"
 echo ""
-echo "首次打开: 右键点击 .app → 打开（未签名应用需要）"
 
-if [ "${1:-}" = "--open" ]; then
-    echo ""
-    echo "🚀 正在打开 $APP_NAME..."
-    open "$APP_DIR"
-fi
+echo "🚀 正在重新打开 $APP_NAME..."
+open "$APP_DIR"
