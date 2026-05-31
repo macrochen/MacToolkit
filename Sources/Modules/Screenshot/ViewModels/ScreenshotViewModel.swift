@@ -50,13 +50,13 @@ final class ScreenshotViewModel: ObservableObject {
         selection.width >= minimumSelectionSize.width && selection.height >= minimumSelectionSize.height
     }
 
-    func startCapture(screen: NSScreen = .main ?? NSScreen.screens[0]) {
+    func startCapture(screen: NSScreen = .main ?? NSScreen.screens[0], preCapturedImage: CGImage? = nil) {
         guard ScreenCaptureService.checkPermission() else {
             ScreenCaptureService.requestPermission()
             return
         }
 
-        guard let image = ScreenCaptureService.captureScreen(screen) else {
+        guard let image = preCapturedImage ?? ScreenCaptureService.captureScreen(screen) else {
             showToast("截图失败")
             return
         }

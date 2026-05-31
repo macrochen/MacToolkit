@@ -10,6 +10,13 @@ struct ScreenshotOverlay: View {
         let screenSize = screen.frame.size
         
         ZStack {
+            // 最底层显示冻结的截图图像，防止背后的实时屏幕内容（如消失的 hover tooltips 或视频）穿透
+            if let cgImage = viewModel.capturedImage {
+                Image(nsImage: NSImage(cgImage: cgImage, size: screenSize))
+                    .resizable()
+                    .ignoresSafeArea()
+            }
+            
             // 背景遮罩 - 点击空白区域可退出
             BackgroundMask(selection: viewModel.selection)
                 .ignoresSafeArea()

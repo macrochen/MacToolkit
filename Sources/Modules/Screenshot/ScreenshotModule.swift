@@ -154,8 +154,13 @@ class ScreenshotModule: ToolkitModule {
             let relevantFlags = nsFlags.intersection([.command, .option, .control, .shift])
             if relevantFlags == hotkey.modifiers {
                 print("[ScreenshotModule] Hotkey triggered!")
+                
+                // 同步截取屏幕以防止由于 RunLoop 切换或 App 激活导致悬浮提示（Hover tooltips）消失
+                let screen = NSScreen.main ?? NSScreen.screens[0]
+                let preCapturedImage = ScreenCaptureService.captureScreen(screen)
+                
                 DispatchQueue.main.async { [weak self] in
-                    self?.startScreenshot()
+                    self?.viewModel.startCapture(screen: screen, preCapturedImage: preCapturedImage)
                 }
                 return true
             }
